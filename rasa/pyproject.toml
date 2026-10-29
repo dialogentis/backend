@@ -1,0 +1,6 @@
+[project]
+name = "atlas-rasa-runtime"
+version = "0.1.0"
+description = "Изолированное окружение Rasa для Атласа"
+requires-python = ">=3.10,<3.11"
+dependencies = ["rasa==3.6.21"]
