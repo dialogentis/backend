@@ -2409,7 +2409,9 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedInvitationView"
+                }
               }
             }
           },
@@ -2879,6 +2881,31 @@
           "token"
         ],
         "title": "AcceptInput"
+      },
+      "AcceptedInvitationView": {
+        "properties": {
+          "organization_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Organization Id"
+          },
+          "role": {
+            "type": "string",
+            "enum": [
+              "owner",
+              "admin",
+              "editor",
+              "viewer"
+            ],
+            "title": "Role"
+          }
+        },
+        "type": "object",
+        "required": [
+          "organization_id",
+          "role"
+        ],
+        "title": "AcceptedInvitationView"
       },
       "Credentials": {
         "properties": {

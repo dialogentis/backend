@@ -1,0 +1,7 @@
+services:
+  frontend:
+    ports: !override ['127.0.0.1:18180:8080']
+  api:
+    ports: !override ['127.0.0.1:18100:8000']
+  mailpit:
+    ports: !override ['127.0.0.1:18125:8025']

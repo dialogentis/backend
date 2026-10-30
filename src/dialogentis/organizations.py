@@ -74,6 +74,11 @@ class OrganizationView(BaseModel):
     role: Literal["owner", "admin", "editor", "viewer"]
 
 
+class AcceptedInvitationView(BaseModel):
+    organization_id: UUID
+    role: Literal["owner", "admin", "editor", "viewer"]
+
+
 def org_json(org: Organization) -> dict:
     return {
         "id": str(org.id),
@@ -335,7 +340,7 @@ async def revoke(org_id: UUID, invitation_id: UUID, user: VerifiedUser, db: Data
     audit(db, org_id, user, "invitation.revoked", invitation_id)
 
 
-@router.post("/invitations/accept")
+@router.post("/invitations/accept", response_model=AcceptedInvitationView)
 async def accept(body: AcceptInput, user: VerifiedUser, db: Database):
     invitation = await db.scalar(
         select(Invitation)
