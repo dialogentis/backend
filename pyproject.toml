@@ -1,0 +1,41 @@
+[project]
+name = "dialogentis-backend"
+version = "0.1.0"
+description = "Dialogentis API and background workers"
+requires-python = ">=3.14,<3.15"
+dependencies = [
+  "fastapi>=0.120", "uvicorn[standard]>=0.38", "pydantic-settings>=2.11",
+  "sqlalchemy[asyncio]>=2.0.44", "psycopg[binary]>=3.2", "alembic>=1.17",
+  "taskiq>=0.12", "taskiq-aio-pika>=0.5", "httpx>=0.28",
+  "scikit-learn>=1.7", "python-crfsuite>=0.9.12", "google-re2>=1.1",
+  "argon2-cffi>=25", "cryptography>=46", "email-validator>=2.3",
+]
+
+[dependency-groups]
+dev = ["ruff>=0.14", "ty>=0.0.1", "pytest>=8.4", "pytest-asyncio>=1.2"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/dialogentis"]
+
+[tool.ruff]
+target-version = "py314"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+markers = ["integration: requires PostgreSQL and RabbitMQ"]
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.ruff.lint.flake8-bugbear]
+extend-immutable-calls = ["taskiq.TaskiqDepends"]
+
+[tool.ty.environment]
+python-version = "3.14"

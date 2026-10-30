@@ -1,0 +1,141 @@
+name: dialogentis
+x-app: &app
+  image: dialogentis-backend:0.1.0
+  build:
+    context: .
+    target: production
+  environment: &runtime-env
+    APP_ENV: ${APP_ENV:-development}
+    PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:18080}
+    DATABASE_URL: ${DATABASE_URL:?Run scripts/init_env.py}
+    BROKER_URL: ${BROKER_URL:?Run scripts/init_env.py}
+    SESSION_SECRET: ${SESSION_SECRET:?Run scripts/init_env.py}
+    ENCRYPTION_KEY: ${ENCRYPTION_KEY:?Run scripts/init_env.py}
+    ENCRYPTION_KEY_VERSION: ${ENCRYPTION_KEY_VERSION:-1}
+    ARTIFACT_ROOT: /app/artifacts
+    SMTP_HOST: ${SMTP_HOST:-mailpit}
+    SMTP_PORT: ${SMTP_PORT:-1025}
+    SMTP_FROM: ${SMTP_FROM:-no-reply@localhost}
+    SMTP_USER: ${SMTP_USER:-}
+    SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+  networks: [internal]
+  init: true
+  security_opt: [no-new-privileges:true]
+  depends_on:
+    postgres: {condition: service_healthy}
+    rabbitmq: {condition: service_healthy}
+
+services:
+  frontend:
+    image: dialogentis-frontend:0.1.0
+    build: ../frontend
+    ports: ['127.0.0.1:18080:8080']
+    networks: [internal, edge]
+    depends_on:
+      api: {condition: service_healthy}
+  postgres:
+    image: postgres:18-alpine@sha256:9a8afca54e7861fd90fab5fdf4c42477a6b1cb7d293595148e674e0a3181de15
+    environment:
+      POSTGRES_USER: dialogentis_bootstrap
+      POSTGRES_DB: dialogentis
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Run scripts/init_env.py}
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD:?Run scripts/init_env.py}
+      MIGRATION_DB_PASSWORD: ${MIGRATION_DB_PASSWORD:?Run scripts/init_env.py}
+    volumes:
+      - postgres-data:/var/lib/postgresql
+      - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/10-roles.sql:ro
+    networks: [internal]
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U dialogentis_bootstrap -d dialogentis']
+      interval: 3s
+      timeout: 3s
+      retries: 30
+  rabbitmq-init:
+    image: rabbitmq:4.2-management-alpine@sha256:5e1200d50b2e03d3babe179f0f9ce34b724d2f1662c83949eafdf9f77ec56434
+    user: '0'
+    network_mode: none
+    volumes: [rabbit-data:/var/lib/rabbitmq]
+    entrypoint: [sh, -ec]
+    command:
+      - |
+        umask 077
+        if [ ! -f /var/lib/rabbitmq/.dialogentis-initialized ]; then
+          od -An -N32 -tx1 /dev/urandom | tr -d ' \n' > /var/lib/rabbitmq/.erlang.cookie
+          touch /var/lib/rabbitmq/.dialogentis-initialized
+        fi
+        chown -R rabbitmq:rabbitmq /var/lib/rabbitmq
+        chmod 600 /var/lib/rabbitmq/.erlang.cookie
+  rabbitmq:
+    image: rabbitmq:4.2-management-alpine@sha256:5e1200d50b2e03d3babe179f0f9ce34b724d2f1662c83949eafdf9f77ec56434
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:?Run scripts/init_env.py}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:?Run scripts/init_env.py}
+    volumes: [rabbit-data:/var/lib/rabbitmq]
+    hostname: rabbitmq
+    depends_on:
+      rabbitmq-init: {condition: service_completed_successfully}
+    networks: [internal]
+    healthcheck:
+      test: [CMD, rabbitmq-diagnostics, -q, ping]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+  api:
+    <<: *app
+    networks: [internal, edge]
+    environment:
+      <<: *runtime-env
+      FORWARDED_ALLOW_IPS: '*'
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      rabbitmq: {condition: service_healthy}
+    ports: ['127.0.0.1:18000:8000']
+    volumes: [artifacts:/app/artifacts]
+    healthcheck:
+      test: [CMD, /app/.venv/bin/python, -c, "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health/ready')"]
+      interval: 10s
+      timeout: 8s
+      retries: 10
+  mailpit:
+    image: axllent/mailpit@sha256:5a49a77c5bdbe7c5474450b4f46348d09949df3695257729c93a30369382d4f6
+    profiles: [dev, test]
+    ports: ['127.0.0.1:18025:8025']
+    networks: [internal, edge]
+  tests:
+    <<: *app
+    image: dialogentis-tests:0.1.0
+    profiles: [test]
+    build:
+      context: .
+      target: test
+    environment:
+      <<: *runtime-env
+      APP_ENV: test
+      RUN_INTEGRATION: '1'
+      MIGRATION_DATABASE_URL: ${MIGRATION_DATABASE_URL:?Run scripts/init_env.py}
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      rabbitmq: {condition: service_healthy}
+      mailpit: {condition: service_started}
+  mailer:
+    <<: *app
+    networks: [internal, edge]
+    command: [uv, run, --locked, --no-dev, --no-sync, python, -m, dialogentis.auth.mailer]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+    restart: unless-stopped
+  migrate:
+    <<: *app
+    environment:
+      <<: *runtime-env
+      MIGRATION_DATABASE_URL: ${MIGRATION_DATABASE_URL:?Run scripts/init_env.py}
+    command: [uv, run, --locked, --no-dev, --no-sync, alembic, upgrade, head]
+
+volumes:
+  postgres-data:
+  rabbit-data:
+  artifacts:
+
+networks:
+  internal: {internal: true}
+  edge: {}

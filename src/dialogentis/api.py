@@ -1,0 +1,137 @@
+import asyncio
+from collections.abc import Awaitable, Callable
+from contextlib import asynccontextmanager
+from datetime import UTC, datetime
+from uuid import uuid4
+
+import aio_pika
+import psycopg
+from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException
+
+from dialogentis.api_errors import error_response
+from dialogentis.auth.routes import router as auth_router
+from dialogentis.auth.security import COOKIE
+from dialogentis.config import Settings, get_settings
+from dialogentis.contracts import ErrorResponse
+from dialogentis.db import session_factory
+from dialogentis.organizations import router as organizations_router
+
+
+def create_app(settings: Settings | None = None) -> FastAPI:
+    config = settings or get_settings()
+    factory = (
+        session_factory(config.database_url.get_secret_value()) if config.database_url else None
+    )
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        yield
+        if factory:
+            await factory.kw["bind"].dispose()
+
+    app = FastAPI(
+        title="Dialogentis API",
+        version="0.1.0",
+        docs_url=(None if config.app_env == "production" else "/api/docs"),
+        openapi_url="/api/openapi.json",
+        lifespan=lifespan,
+        responses={
+            status: {"model": ErrorResponse}
+            for status in (400, 401, 403, 404, 409, 413, 422, 429, 503)
+        },
+    )
+    app.state.settings = config
+    app.state.session_factory = factory
+    app.include_router(auth_router)
+    app.include_router(organizations_router)
+
+    @app.middleware("http")
+    async def request_context(request: Request, call_next: Callable[[Request], Awaitable]):
+        request.state.request_id = str(uuid4())
+        length = request.headers.get("content-length", "0")
+        if not length.isdigit() or int(length) > config.max_body_bytes:
+            response = error_response(
+                request, 413, "payload_too_large", "Request body is too large"
+            )
+        else:
+            response = await call_next(request)
+        response.headers["X-Request-ID"] = request.state.request_id
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        response.headers["Cache-Control"] = "no-store"
+        session = getattr(request.state, "session_cookie", None)
+        if session:
+            token, expires = session
+            response.set_cookie(
+                COOKIE,
+                token,
+                max_age=max(0, int((expires - datetime.now(UTC)).total_seconds())),
+                httponly=True,
+                samesite="lax",
+                secure=config.public_base_url.startswith("https://"),
+            )
+        return response
+
+    @app.exception_handler(HTTPException)
+    async def http_error(request: Request, exc: HTTPException):
+        response = error_response(
+            request, exc.status_code, f"http_{exc.status_code}", str(exc.detail)
+        )
+        response.headers.update(exc.headers or {})
+        return response
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_error(request: Request, exc: RequestValidationError):
+        # Do not echo the submitted value (passwords and message texts included).
+        return error_response(
+            request,
+            422,
+            "validation_error",
+            "Invalid request",
+            [
+                {"path": list(error["loc"]), "code": error["type"], "message": "Invalid value"}
+                for error in exc.errors()
+            ],
+        )
+
+    @app.get("/api/health/live", tags=["health"])
+    async def liveness() -> dict[str, str]:
+        return {"status": "ok"}
+
+    @app.get("/api/health/ready", tags=["health"])
+    async def readiness(request: Request):
+        checks = {"database": "unavailable", "broker": "unavailable"}
+        if config.database_url:
+            try:
+                async with asyncio.timeout(3):
+                    async with await psycopg.AsyncConnection.connect(
+                        config.database_url.get_secret_value().replace(
+                            "postgresql+psycopg", "postgresql"
+                        )
+                    ) as connection:
+                        await connection.execute("SELECT 1")
+                checks["database"] = "ok"
+            except TimeoutError, psycopg.Error:
+                pass
+        if config.broker_url:
+            try:
+                async with asyncio.timeout(3):
+                    connection = await aio_pika.connect(config.broker_url.get_secret_value())
+                    await connection.close()
+                checks["broker"] = "ok"
+            except TimeoutError, ConnectionError, OSError:
+                pass
+        ready = all(value == "ok" for value in checks.values())
+        return JSONResponse(
+            status_code=200 if ready else 503,
+            content={
+                "status": "ready" if ready else "unavailable",
+                "checks": checks,
+                "request_id": request.state.request_id,
+            },
+        )
+
+    return app
