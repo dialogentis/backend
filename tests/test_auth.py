@@ -173,6 +173,23 @@ async def test_invitations_roles_and_transfer(app):
                 f"/api/v1/organizations/{org}/members/{owner_id}", json={"role": "viewer"}
             )
         ).status_code == 403
+        admin_email = f"admin-{uuid4()}@example.com"
+        admin_invite = await owner.post(
+            f"/api/v1/organizations/{org}/invitations",
+            json={"email": admin_email, "role": "admin"},
+        )
+        assert admin_invite.status_code == 201
+        invitation_id = admin_invite.json()["id"]
+        path = f"/api/v1/organizations/{org}/invitations/{invitation_id}"
+        assert (await guest.delete(path)).status_code == 403
+        assert (await guest.post(f"{path}/resend")).status_code == 403
+        assert (
+            await guest.post(
+                f"/api/v1/organizations/{org}/invitations",
+                json={"email": admin_email, "role": "editor"},
+            )
+        ).status_code == 403
+        assert (await owner.delete(path)).status_code == 204
         result = await owner.post(
             f"/api/v1/organizations/{org}/transfer-ownership",
             json={"new_owner_user_id": guest_id, "password": PASSWORD},

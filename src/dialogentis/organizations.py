@@ -79,6 +79,26 @@ class AcceptedInvitationView(BaseModel):
     role: Literal["owner", "admin", "editor", "viewer"]
 
 
+class MemberView(BaseModel):
+    user_id: UUID
+    email: str
+    role: Literal["owner", "admin", "editor", "viewer"]
+
+
+class MemberRoleView(BaseModel):
+    user_id: UUID
+    role: Role
+
+
+class InvitationView(BaseModel):
+    id: UUID
+    email: str
+    role: Role
+    expires_at: datetime
+    revoked: bool
+    accepted: bool
+
+
 def org_json(org: Organization) -> dict:
     return {
         "id": str(org.id),
@@ -172,7 +192,7 @@ async def get_organization(org_id: UUID, user: VerifiedUser, db: Database):
     return {**org_json(org), "role": membership.role}
 
 
-@router.get("/organizations/{org_id}/members")
+@router.get("/organizations/{org_id}/members", response_model=CursorPage[MemberView])
 async def list_members(org_id: UUID, user: VerifiedUser, db: Database):
     await organization_context(db, user, org_id, ("owner", "admin"))
     rows = (
@@ -191,7 +211,7 @@ async def list_members(org_id: UUID, user: VerifiedUser, db: Database):
     }
 
 
-@router.patch("/organizations/{org_id}/members/{user_id}")
+@router.patch("/organizations/{org_id}/members/{user_id}", response_model=MemberRoleView)
 async def set_role(org_id: UUID, user_id: UUID, body: RoleInput, user: VerifiedUser, db: Database):
     actor = await organization_context(db, user, org_id, ("owner", "admin"), lock=True)
     target = await db.get(Membership, (org_id, user_id))
@@ -278,7 +298,7 @@ async def send_invitation(
     )
 
 
-@router.post("/organizations/{org_id}/invitations", status_code=201)
+@router.post("/organizations/{org_id}/invitations", status_code=201, response_model=InvitationView)
 async def invite(
     org_id: UUID, body: InvitationInput, request: Request, user: VerifiedUser, db: Database
 ):
@@ -304,6 +324,8 @@ async def invite(
             )
         )
     ).all()
+    if actor.role == "admin" and any(item.role == "admin" for item in previous):
+        raise HTTPException(403, "Управление администраторами доступно владельцу")
     for item in previous:
         item.revoked = True
     invitation = Invitation(organization_id=org_id, email=email, role=body.role)
@@ -317,7 +339,7 @@ async def invite(
     return invitation_json(invitation)
 
 
-@router.get("/organizations/{org_id}/invitations")
+@router.get("/organizations/{org_id}/invitations", response_model=CursorPage[InvitationView])
 async def list_invitations(org_id: UUID, user: VerifiedUser, db: Database):
     await organization_context(db, user, org_id, ("owner", "admin"))
     rows = (
@@ -332,10 +354,12 @@ async def list_invitations(org_id: UUID, user: VerifiedUser, db: Database):
 
 @router.delete("/organizations/{org_id}/invitations/{invitation_id}", status_code=204)
 async def revoke(org_id: UUID, invitation_id: UUID, user: VerifiedUser, db: Database):
-    await organization_context(db, user, org_id, ("owner", "admin"), lock=True)
+    actor = await organization_context(db, user, org_id, ("owner", "admin"), lock=True)
     invitation = await db.get(Invitation, invitation_id)
     if invitation is None:
         raise HTTPException(404, "Приглашение не найдено")
+    if actor.role == "admin" and invitation.role == "admin":
+        raise HTTPException(403, "Управление администраторами доступно владельцу")
     invitation.revoked = True
     audit(db, org_id, user, "invitation.revoked", invitation_id)
 
