@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Literal
 from uuid import UUID, uuid4
 
 from sqlalchemy import (
@@ -65,12 +66,14 @@ class Agent(Base):
     slug: Mapped[str] = mapped_column(String(64))
     description: Mapped[str] = mapped_column(String(2000), default="")
     language: Mapped[str] = mapped_column(String(2), default="ru")
-    status: Mapped[str] = mapped_column(String(16), default="active")
+    status: Mapped[Literal["active", "archived"]] = mapped_column(String(16), default="active")
+    revision: Mapped[int] = mapped_column(default=1, server_default=text("1"))
     __table_args__ = (
         UniqueConstraint("organization_id", "id"),
         UniqueConstraint("organization_id", "slug"),
         CheckConstraint("language = 'ru'"),
         CheckConstraint("status IN ('active','archived')"),
+        CheckConstraint("revision > 0"),
     )
 
 

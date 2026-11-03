@@ -11,6 +11,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException
 
+from dialogentis.agents import router as agents_router
 from dialogentis.api_errors import error_response
 from dialogentis.auth.routes import router as auth_router
 from dialogentis.auth.security import COOKIE
@@ -41,7 +42,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         lifespan=lifespan,
         responses={
             status: {"model": ErrorResponse}
-            for status in (400, 401, 403, 404, 409, 413, 422, 429, 503)
+            for status in (400, 401, 403, 404, 409, 412, 413, 422, 423, 428, 429, 503)
         },
     )
     app.state.settings = config
@@ -49,6 +50,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(auth_router)
     app.include_router(organizations_router)
     app.include_router(deletions_router)
+    app.include_router(agents_router)
 
     @app.middleware("http")
     async def request_context(request: Request, call_next: Callable[[Request], Awaitable]):
