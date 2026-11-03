@@ -59,6 +59,16 @@ async def test_lease_fencing_permissions_and_atomic_draft_save(app):
         original = await owner.get(f"{base}/draft")
         assert original.status_code == 200 and original.headers["etag"] == '"rev-1"'
         assert original.json()["lease"] is None
+        initial_validation = await owner.post(f"{base}/draft/validate", json={"revision": 1})
+        assert initial_validation.status_code == 200
+        assert (
+            initial_validation.json()["scope"] == "dataset"
+            and not initial_validation.json()["complete"]
+        )
+        assert "insufficient_intents" in {
+            item["code"] for item in initial_validation.json()["errors"]
+        }
+        assert (await owner.post(f"{base}/draft/validate", json={"revision": 2})).status_code == 409
         body = {"schema_version": 1, "config": original.json()["config"]}
         a, b = await asyncio.gather(
             owner.post(f"{base}/edit-lease", json={"tab_id": str(uuid4())}),
@@ -111,6 +121,9 @@ async def test_lease_fencing_permissions_and_atomic_draft_save(app):
             await editor.post(f"{base}/edit-lease/renew", headers=editor_auth)
         ).status_code == 403
         assert (
+            await editor.post(f"{base}/draft/validate", json={"revision": 2})
+        ).status_code == 403
+        assert (
             await editor.put(
                 f"{base}/draft", json=body, headers={**editor_auth, "If-Match": '"rev-2"'}
             )
@@ -133,3 +146,46 @@ async def test_lease_fencing_permissions_and_atomic_draft_save(app):
             await owner2.delete(f"{base}/edit-lease", headers=headers(renewed.json()))
         ).status_code == 204
         assert (await owner.get(f"{base}/draft")).json()["lease"] is None
+        final_grant = (await owner.post(f"{base}/edit-lease", json={"tab_id": str(uuid4())})).json()
+        first, second = str(uuid4()), str(uuid4())
+        body["config"]["intents"] = [
+            {"id": first, "code": "first", "name": "Первое"},
+            {"id": second, "code": "second", "name": "Второе"},
+        ]
+        body["config"]["entities"] = [
+            {
+                "id": str(uuid4()),
+                "code": "bad_regex",
+                "name": "Проверка",
+                "value_type": "string",
+                "method": "regex",
+                "pattern": r"(a)\1",
+            }
+        ]
+        body["config"]["examples"] = [
+            {
+                "id": str(uuid4()),
+                "text": "PRIVATE_SENTINEL",
+                "intent_id": first,
+                "split": "train",
+                "spans": [],
+            },
+            {
+                "id": str(uuid4()),
+                "text": "private_sentinel",
+                "intent_id": first,
+                "split": "test",
+                "spans": [],
+            },
+        ]
+        assert (
+            await owner.put(
+                f"{base}/draft", json=body, headers={**headers(final_grant), "If-Match": '"rev-2"'}
+            )
+        ).status_code == 200
+        validation = await owner.post(f"{base}/draft/validate", json={"revision": 3})
+        assert validation.status_code == 200
+        assert {"duplicate_across_splits", "invalid_regex"} <= {
+            item["code"] for item in validation.json()["errors"]
+        }
+        assert "PRIVATE_SENTINEL" not in validation.text
