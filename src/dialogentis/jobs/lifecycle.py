@@ -17,6 +17,10 @@ HEARTBEAT_TIMEOUT = timedelta(minutes=2)
 Apply = Callable[[AsyncSession, Job], Awaitable[None]]
 
 
+class RetryableJobError(Exception):
+    """A temporary error whose details must not be persisted in job metadata."""
+
+
 @dataclass(frozen=True)
 class Claim:
     job_id: UUID
@@ -135,7 +139,11 @@ async def cancel(
 ) -> bool:
     async with unit_of_work(factory, organization_id=organization_id) as db:
         job = await db.scalar(select(Job).where(Job.id == job_id).with_for_update())
-        if job is None or job.status not in {"queued", "running"}:
+        if (
+            job is None
+            or job.kind == "organization.deletion"
+            or job.status not in {"queued", "running"}
+        ):
             return False
         job.cancel_requested = True
         if job.status == "queued":

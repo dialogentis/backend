@@ -36,6 +36,7 @@ class Organization(Base):
     slug: Mapped[str] = mapped_column(String(64), unique=True)
     retention_days: Mapped[int] = mapped_column(default=30)
     store_message_text: Mapped[bool] = mapped_column(default=True)
+    deletion_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     __table_args__ = (CheckConstraint("retention_days BETWEEN 1 AND 30"),)
 

@@ -13,6 +13,7 @@ x-app: &app
     ENCRYPTION_KEY: ${ENCRYPTION_KEY:?Run scripts/init_env.py}
     ENCRYPTION_KEY_VERSION: ${ENCRYPTION_KEY_VERSION:-1}
     ARTIFACT_ROOT: /app/artifacts
+    DELETION_JOURNAL_ROOT: /app/deletion-journal
     SMTP_HOST: ${SMTP_HOST:-mailpit}
     SMTP_PORT: ${SMTP_PORT:-1025}
     SMTP_FROM: ${SMTP_FROM:-no-reply@localhost}
@@ -87,7 +88,7 @@ services:
       <<: *runtime-env
       FORWARDED_ALLOW_IPS: '*'
     depends_on:
-      migrate: {condition: service_completed_successfully}
+      deletion-replay: {condition: service_completed_successfully}
       rabbitmq: {condition: service_healthy}
     ports: ['127.0.0.1:18000:8000']
     volumes: [artifacts:/app/artifacts]
@@ -126,16 +127,16 @@ services:
       RUN_INTEGRATION: '1'
       MIGRATION_DATABASE_URL: ${MIGRATION_DATABASE_URL:?Run scripts/init_env.py}
     depends_on:
-      migrate: {condition: service_completed_successfully}
+      deletion-replay: {condition: service_completed_successfully}
       rabbitmq: {condition: service_healthy}
       mailpit: {condition: service_started}
-    volumes: [dispatcher-secret:/run/dialogentis-dispatcher:ro]
+    volumes: [dispatcher-secret:/run/dialogentis-dispatcher:ro, deletion-journal:/app/deletion-journal]
   mailer:
     <<: *app
     networks: [internal, edge]
     command: [uv, run, --locked, --no-dev, --no-sync, python, -m, dialogentis.auth.mailer]
     depends_on:
-      migrate: {condition: service_completed_successfully}
+      deletion-replay: {condition: service_completed_successfully}
     restart: unless-stopped
   dispatcher:
     <<: *app
@@ -144,22 +145,22 @@ services:
     volumes: [dispatcher-secret:/run/dialogentis-dispatcher:ro]
     command: [uv, run, --locked, --no-dev, --no-sync, python, -m, dialogentis.jobs.dispatcher]
     depends_on:
-      migrate: {condition: service_completed_successfully}
+      deletion-replay: {condition: service_completed_successfully}
       rabbitmq: {condition: service_healthy}
     restart: unless-stopped
   worker:
     <<: *app
     command: [uv, run, --locked, --no-dev, --no-sync, taskiq, worker, 'dialogentis.jobs.tasks:broker', --workers, '1', --ack-type, manual, --max-async-tasks, '1']
     depends_on:
-      migrate: {condition: service_completed_successfully}
+      deletion-replay: {condition: service_completed_successfully}
       rabbitmq: {condition: service_healthy}
-    volumes: [artifacts:/app/artifacts]
+    volumes: [artifacts:/app/artifacts, deletion-journal:/app/deletion-journal]
     restart: unless-stopped
   maintenance-worker:
     <<: *app
     command: [uv, run, --locked, --no-dev, --no-sync, taskiq, worker, 'dialogentis.jobs.maintenance:broker', --workers, '1', --ack-type, manual, --max-async-tasks, '1']
     depends_on:
-      migrate: {condition: service_completed_successfully}
+      deletion-replay: {condition: service_completed_successfully}
       rabbitmq: {condition: service_healthy}
     volumes: [dispatcher-secret:/run/dialogentis-dispatcher:ro]
     restart: unless-stopped
@@ -169,7 +170,7 @@ services:
       BROKER_URL: ${BROKER_URL:?Run scripts/init_env.py}
     command: [uv, run, --locked, --no-dev, --no-sync, taskiq, scheduler, 'dialogentis.jobs.maintenance:scheduler']
     depends_on:
-      migrate: {condition: service_completed_successfully}
+      deletion-replay: {condition: service_completed_successfully}
       rabbitmq: {condition: service_healthy}
     restart: unless-stopped
   migrate:
@@ -181,12 +182,19 @@ services:
     depends_on:
       postgres: {condition: service_healthy}
       dispatcher-init: {condition: service_completed_successfully}
+  deletion-replay:
+    <<: *app
+    command: [uv, run, --locked, --no-dev, --no-sync, python, -m, dialogentis.replay_deletions]
+    volumes: [deletion-journal:/app/deletion-journal:ro]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
 
 volumes:
   postgres-data:
   rabbit-data:
   artifacts:
   dispatcher-secret:
+  deletion-journal:
 
 networks:
   internal: {internal: true}

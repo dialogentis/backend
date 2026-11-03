@@ -90,7 +90,18 @@ async def test_dispatcher_is_restricted_and_recovers_after_publish_failure(tmp_p
     try:
         async with dispatch_factory() as db:
             assert await db.scalar(text("SELECT current_user")) == "dialogentis_dispatcher"
-            assert len((await db.scalars(select(OutboxEvent))).all()) == 2
+            assert (
+                len(
+                    (
+                        await db.scalars(
+                            select(OutboxEvent).where(
+                                OutboxEvent.organization_id == organization_id
+                            )
+                        )
+                    ).all()
+                )
+                == 2
+            )
         with pytest.raises(DBAPIError):
             async with dispatch_factory() as db:
                 await db.execute(select(Job))

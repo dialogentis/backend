@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     encryption_key: SecretStr | None = None
     encryption_key_version: int = 1
     artifact_root: Path = Path("artifacts")
+    deletion_journal_root: Path = Path("deletion-journal")
     smtp_host: str | None = None
     smtp_port: int = 1025
     smtp_user: str | None = None
@@ -52,6 +53,8 @@ class Settings(BaseSettings):
                 raise ValueError("SESSION_SECRET must contain at least 32 characters")
             if not self.artifact_root.is_absolute():
                 raise ValueError("Production ARTIFACT_ROOT must be absolute")
+            if not self.deletion_journal_root.is_absolute():
+                raise ValueError("Production DELETION_JOURNAL_ROOT must be absolute")
         return self
 
 

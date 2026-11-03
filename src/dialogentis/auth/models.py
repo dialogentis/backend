@@ -43,3 +43,4 @@ class EmailOutbox(Base):
         DateTime(timezone=True), server_default=func.now()
     )
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    organization_id: Mapped[UUID | None] = mapped_column(index=True)

@@ -25,6 +25,7 @@ def main() -> None:
         "ENCRYPTION_KEY": Fernet.generate_key().decode(),
         "ENCRYPTION_KEY_VERSION": "1",
         "ARTIFACT_ROOT": "/app/artifacts",
+        "DELETION_JOURNAL_ROOT": "/app/deletion-journal",
         "SMTP_HOST": "mailpit",
         "SMTP_PORT": "1025",
         "SMTP_FROM": "no-reply@localhost",

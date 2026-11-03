@@ -7,7 +7,7 @@ from uuid import UUID, uuid4
 from cryptography.fernet import Fernet
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, EmailStr, Field
-from sqlalchemy import DateTime, ForeignKey, String, select, text
+from sqlalchemy import DateTime, ForeignKey, ForeignKeyConstraint, String, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -19,9 +19,11 @@ from dialogentis.models import Base, Membership, Organization, User
 
 router = APIRouter(prefix="/api/v1", tags=["organizations"])
 Role = Literal["admin", "editor", "viewer"]
-Permission = Literal["manage_members", "manage_admins", "transfer_ownership"]
+Permission = Literal["manage_members", "manage_admins", "transfer_ownership", "delete_organization"]
 ROLE_PERMISSIONS: dict[str, frozenset[Permission]] = {
-    "owner": frozenset({"manage_members", "manage_admins", "transfer_ownership"}),
+    "owner": frozenset(
+        {"manage_members", "manage_admins", "transfer_ownership", "delete_organization"}
+    ),
     "admin": frozenset({"manage_members"}),
     "editor": frozenset(),
     "viewer": frozenset(),
@@ -48,6 +50,18 @@ class AuditEvent(Base):
     action: Mapped[str] = mapped_column(String(64))
     target_id: Mapped[UUID] = mapped_column()
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class OrganizationDeletion(Base):
+    __tablename__ = "organization_deletions"
+    job_id: Mapped[UUID] = mapped_column(primary_key=True)
+    organization_id: Mapped[UUID] = mapped_column(unique=True)
+    requested_by: Mapped[UUID] = mapped_column(ForeignKey("users.id"))
+    requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    __table_args__ = (
+        ForeignKeyConstraint(["organization_id", "job_id"], ["jobs.organization_id", "jobs.id"]),
+    )
 
 
 class OrganizationInput(InputModel):
@@ -123,6 +137,7 @@ async def organization_context(
     permission: Permission | None = None,
     *,
     lock: bool = False,
+    allow_deleting: bool = False,
 ) -> Membership:
     membership = await db.get(Membership, (org_id, user.id))
     if membership is None:
@@ -130,8 +145,13 @@ async def organization_context(
     await db.execute(
         text("SELECT set_config('app.organization_id', :id, true)"), {"id": str(org_id)}
     )
+    org_query = select(Organization).where(Organization.id == org_id)
     if lock:
-        await db.scalar(select(Organization).where(Organization.id == org_id).with_for_update())
+        org_query = org_query.with_for_update()
+    org = await db.scalar(org_query.execution_options(populate_existing=True))
+    if org is None or (org.deletion_requested_at is not None and not allow_deleting):
+        raise HTTPException(404, "Пространство не найдено")
+    if lock:
         membership = await db.scalar(
             select(Membership)
             .where(
@@ -168,7 +188,7 @@ async def list_organizations(user: VerifiedUser, db: Database):
                 Membership,
                 Membership.organization_id == Organization.id,
             )
-            .where(Membership.user_id == user.id)
+            .where(Membership.user_id == user.id, Organization.deletion_requested_at.is_(None))
             .order_by(Organization.created_at, Organization.id)
         )
     ).all()
@@ -306,9 +326,10 @@ async def send_invitation(
     )
     db.add(
         EmailOutbox(
+            organization_id=org.id,
             encrypted_payload=Fernet(key.get_secret_value().encode())
             .encrypt(payload.encode())
-            .decode()
+            .decode(),
         )
     )
 
@@ -384,6 +405,26 @@ async def revoke(org_id: UUID, invitation_id: UUID, user: VerifiedUser, db: Data
 @router.post("/invitations/accept", response_model=AcceptedInvitationView)
 async def accept(body: AcceptInput, user: VerifiedUser, db: Database):
     invitation = await db.scalar(
+        select(Invitation).where(
+            Invitation.token_hash == digest(body.token),
+            Invitation.email == user.email,
+            Invitation.revoked.is_(False),
+            Invitation.consumed_at.is_(None),
+            Invitation.expires_at > datetime.now(UTC),
+        )
+    )
+    if invitation is None:
+        raise HTTPException(400, "Приглашение недействительно или срок его действия истёк")
+    await db.execute(
+        text("SELECT set_config('app.organization_id', :id, true)"),
+        {"id": str(invitation.organization_id)},
+    )
+    org = await db.scalar(
+        select(Organization).where(Organization.id == invitation.organization_id).with_for_update()
+    )
+    if org is None or org.deletion_requested_at is not None:
+        raise HTTPException(400, "Приглашение недействительно или срок его действия истёк")
+    invitation = await db.scalar(
         select(Invitation)
         .where(
             Invitation.token_hash == digest(body.token),
@@ -393,13 +434,10 @@ async def accept(body: AcceptInput, user: VerifiedUser, db: Database):
             Invitation.expires_at > datetime.now(UTC),
         )
         .with_for_update()
+        .execution_options(populate_existing=True)
     )
     if invitation is None:
         raise HTTPException(400, "Приглашение недействительно или срок его действия истёк")
-    await db.execute(
-        text("SELECT set_config('app.organization_id', :id, true)"),
-        {"id": str(invitation.organization_id)},
-    )
     member = await db.get(Membership, (invitation.organization_id, user.id))
     if member is None:
         member = Membership(

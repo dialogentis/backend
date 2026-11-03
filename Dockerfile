@@ -2,7 +2,7 @@ FROM python:3.14.6-slim-bookworm@sha256:4c92ffcde4dd6f1ff72a24518f49fd4990b27134
 RUN pip install --no-cache-dir --disable-pip-version-check uv==0.11.29
 ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy UV_PYTHON_DOWNLOADS=never PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 WORKDIR /app
-RUN useradd --uid 10001 --create-home app && mkdir /app/artifacts && chown app:app /app/artifacts
+RUN useradd --uid 10001 --create-home app && mkdir /app/artifacts /app/deletion-journal && chown app:app /app/artifacts /app/deletion-journal
 COPY pyproject.toml uv.lock .python-version ./
 RUN --mount=type=cache,target=/root/.cache/uv uv sync --locked --no-dev --no-install-project --python /usr/local/bin/python
 COPY src ./src

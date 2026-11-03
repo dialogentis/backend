@@ -294,6 +294,7 @@ async def test_worker_heartbeats_and_cooperatively_cancels_handler(factory, monk
     org_id = uuid4()
     tenants.append(org_id)
     async with unit_of_work(factory, organization_id=org_id) as db:
+        db.add(Organization(id=org_id, name="Test", slug=f"org-{uuid4()}"))
         job_id = enqueue(db, org_id, "slow").id
     started, stopped = asyncio.Event(), asyncio.Event()
 
@@ -341,6 +342,7 @@ async def test_worker_times_out_before_scheduling_retry(factory):
     org_id = uuid4()
     tenants.append(org_id)
     async with unit_of_work(factory, organization_id=org_id) as db:
+        db.add(Organization(id=org_id, name="Test", slug=f"org-{uuid4()}"))
         job_id = enqueue(db, org_id, "slow").id
     stopped = asyncio.Event()
 
@@ -357,6 +359,50 @@ async def test_worker_times_out_before_scheduling_retry(factory):
         job = await db.get(Job, job_id)
         assert job is not None and job.status == "queued" and job.error_code == "timeout"
         assert job.execution_token is None and job.next_retry_at is not None
+
+
+async def test_deleting_organization_fences_inflight_job_result(factory):
+    from dialogentis.jobs.tasks import Handler, process_job
+
+    factory, tenants = factory
+    org_id = uuid4()
+    tenants.append(org_id)
+    async with unit_of_work(factory, organization_id=org_id) as db:
+        db.add(Organization(id=org_id, name="Before", slug=f"org-{uuid4()}"))
+        job_id = enqueue(db, org_id, "slow").id
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def prepare(_factory, _current):
+        started.set()
+        await release.wait()
+
+        async def apply(db, job):
+            org = await db.get(Organization, job.organization_id)
+            assert org is not None
+            org.name = "Should not apply"
+
+        return apply
+
+    task = asyncio.create_task(
+        process_job(factory, job_id, org_id, {"slow": Handler(prepare, 3, True)})
+    )
+    await asyncio.wait_for(started.wait(), timeout=2)
+    async with unit_of_work(factory, organization_id=org_id) as db:
+        org = await db.scalar(
+            select(Organization).where(Organization.id == org_id).with_for_update()
+        )
+        assert org is not None
+        org.deletion_requested_at = datetime.now(UTC)
+    release.set()
+    await asyncio.wait_for(task, timeout=2)
+    async with unit_of_work(factory, organization_id=org_id) as db:
+        org, job = await db.get(Organization, org_id), await db.get(Job, job_id)
+        assert org is not None and org.name == "Before"
+        assert (
+            job is not None
+            and job.status == "failed"
+            and job.error_code == "organization_unavailable"
+        )
 
 
 async def test_scheduled_maintenance_task_runs_in_worker(factory, tmp_path):
