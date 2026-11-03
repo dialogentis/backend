@@ -19,6 +19,7 @@ from dialogentis.config import Settings, get_settings
 from dialogentis.contracts import ErrorResponse
 from dialogentis.db import session_factory
 from dialogentis.deletions import router as deletions_router
+from dialogentis.drafts import router as drafts_router
 from dialogentis.organizations import router as organizations_router
 
 
@@ -51,6 +52,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(organizations_router)
     app.include_router(deletions_router)
     app.include_router(agents_router)
+    app.include_router(drafts_router)
 
     @app.middleware("http")
     async def request_context(request: Request, call_next: Callable[[Request], Awaitable]):

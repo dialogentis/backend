@@ -3,6 +3,7 @@ from typing import Literal
 from uuid import UUID, uuid4
 
 from sqlalchemy import (
+    BigInteger,
     CheckConstraint,
     DateTime,
     ForeignKey,
@@ -85,9 +86,21 @@ class AgentDraft(Base):
     revision: Mapped[int] = mapped_column(default=1)
     schema_version: Mapped[int] = mapped_column(default=1)
     configuration: Mapped[dict] = mapped_column(JSONB)
+    lease_holder_id: Mapped[UUID | None] = mapped_column(ForeignKey("users.id"))
+    lease_tab_id: Mapped[UUID | None] = mapped_column()
+    lease_token_hash: Mapped[str | None] = mapped_column(String(64))
+    lease_fence: Mapped[int] = mapped_column(BigInteger, default=0, server_default=text("0"))
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     __table_args__ = (
         ForeignKeyConstraint(
             ["organization_id", "agent_id"], ["agents.organization_id", "agents.id"]
         ),
         CheckConstraint("revision > 0 AND schema_version > 0"),
+        CheckConstraint("lease_fence >= 0"),
+        CheckConstraint(
+            "(lease_holder_id IS NULL AND lease_tab_id IS NULL AND lease_token_hash IS NULL "
+            "AND lease_expires_at IS NULL) OR (lease_holder_id IS NOT NULL "
+            "AND lease_tab_id IS NOT NULL "
+            "AND lease_token_hash IS NOT NULL AND lease_expires_at IS NOT NULL)"
+        ),
     )

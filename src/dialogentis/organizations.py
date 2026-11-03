@@ -20,7 +20,12 @@ from dialogentis.models import Base, Membership, Organization, User
 router = APIRouter(prefix="/api/v1", tags=["organizations"])
 Role = Literal["admin", "editor", "viewer"]
 Permission = Literal[
-    "manage_members", "manage_admins", "transfer_ownership", "delete_organization", "manage_agents"
+    "manage_members",
+    "manage_admins",
+    "transfer_ownership",
+    "delete_organization",
+    "manage_agents",
+    "revoke_lease",
 ]
 ROLE_PERMISSIONS: dict[str, frozenset[Permission]] = {
     "owner": frozenset(
@@ -30,9 +35,10 @@ ROLE_PERMISSIONS: dict[str, frozenset[Permission]] = {
             "transfer_ownership",
             "delete_organization",
             "manage_agents",
+            "revoke_lease",
         }
     ),
-    "admin": frozenset({"manage_members", "manage_agents"}),
+    "admin": frozenset({"manage_members", "manage_agents", "revoke_lease"}),
     "editor": frozenset({"manage_agents"}),
     "viewer": frozenset(),
 }
