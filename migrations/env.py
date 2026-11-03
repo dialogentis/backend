@@ -2,6 +2,7 @@ from alembic import context
 from sqlalchemy import create_engine
 
 import dialogentis.auth.models  # noqa: F401 - register auth tables for metadata comparison
+import dialogentis.jobs.models  # noqa: F401 - register job tables
 import dialogentis.organizations  # noqa: F401 - register organization tables
 from dialogentis.config import get_settings
 from dialogentis.models import Base

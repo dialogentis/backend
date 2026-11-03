@@ -96,6 +96,18 @@ services:
       interval: 10s
       timeout: 8s
       retries: 10
+  dispatcher-init:
+    image: postgres:18-alpine@sha256:9a8afca54e7861fd90fab5fdf4c42477a6b1cb7d293595148e674e0a3181de15
+    user: '0'
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD:?Run scripts/init_env.py}
+    volumes:
+      - dispatcher-secret:/run/dialogentis-dispatcher
+      - ./scripts/init-dispatcher.sh:/init-dispatcher.sh:ro
+    entrypoint: [sh, /init-dispatcher.sh]
+    networks: [internal]
+    depends_on:
+      postgres: {condition: service_healthy}
   mailpit:
     image: axllent/mailpit@sha256:5a49a77c5bdbe7c5474450b4f46348d09949df3695257729c93a30369382d4f6
     profiles: [dev, test]
@@ -117,6 +129,7 @@ services:
       migrate: {condition: service_completed_successfully}
       rabbitmq: {condition: service_healthy}
       mailpit: {condition: service_started}
+    volumes: [dispatcher-secret:/run/dialogentis-dispatcher:ro]
   mailer:
     <<: *app
     networks: [internal, edge]
@@ -130,11 +143,15 @@ services:
       <<: *runtime-env
       MIGRATION_DATABASE_URL: ${MIGRATION_DATABASE_URL:?Run scripts/init_env.py}
     command: [uv, run, --locked, --no-dev, --no-sync, alembic, upgrade, head]
+    depends_on:
+      postgres: {condition: service_healthy}
+      dispatcher-init: {condition: service_completed_successfully}
 
 volumes:
   postgres-data:
   rabbit-data:
   artifacts:
+  dispatcher-secret:
 
 networks:
   internal: {internal: true}

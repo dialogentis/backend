@@ -19,3 +19,15 @@ async def probe(nonce: UUID, context: Context = TaskiqDepends()) -> None:
         stream.flush()
         os.fsync(stream.fileno())
     await context.ack()
+
+
+@broker.task(ack_type="manual")
+async def job_probe(
+    job_id: UUID, organization_id: UUID, context: Context = TaskiqDepends()
+) -> None:
+    root = Path(os.environ["TEST_OUTPUT_DIR"])
+    with (root / str(job_id)).open("w") as stream:
+        stream.write(str(organization_id))
+        stream.flush()
+        os.fsync(stream.fileno())
+    await context.ack()
