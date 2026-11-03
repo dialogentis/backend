@@ -1,6 +1,8 @@
 import asyncio
 import os
+from copy import deepcopy
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
@@ -59,6 +61,9 @@ async def test_lease_fencing_permissions_and_atomic_draft_save(app):
         original = await owner.get(f"{base}/draft")
         assert original.status_code == 200 and original.headers["etag"] == '"rev-1"'
         assert original.json()["lease"] is None
+        dataset = await editor.get(f"{base}/draft/dataset")
+        assert dataset.status_code == 200 and dataset.json()["revision"] == 1
+        assert dataset.json()["dataset"]["intents"] == []
         initial_validation = await owner.post(f"{base}/draft/validate", json={"revision": 1})
         assert initial_validation.status_code == 200
         assert (
@@ -69,7 +74,7 @@ async def test_lease_fencing_permissions_and_atomic_draft_save(app):
             item["code"] for item in initial_validation.json()["errors"]
         }
         assert (await owner.post(f"{base}/draft/validate", json={"revision": 2})).status_code == 409
-        body = {"schema_version": 1, "config": original.json()["config"]}
+        body: dict[str, Any] = {"schema_version": 1, "config": original.json()["config"]}
         a, b = await asyncio.gather(
             owner.post(f"{base}/edit-lease", json={"tab_id": str(uuid4())}),
             owner2.post(f"{base}/edit-lease", json={"tab_id": str(uuid4())}),
@@ -178,11 +183,21 @@ async def test_lease_fencing_permissions_and_atomic_draft_save(app):
                 "spans": [],
             },
         ]
-        assert (
-            await owner.put(
-                f"{base}/draft", json=body, headers={**headers(final_grant), "If-Match": '"rev-2"'}
-            )
-        ).status_code == 200
+        rejected = await owner.put(
+            f"{base}/draft", json=body, headers={**headers(final_grant), "If-Match": '"rev-2"'}
+        )
+        assert rejected.status_code == 422
+        assert {"duplicate_across_splits", "invalid_regex"} <= {
+            item["code"] for item in rejected.json()["error"]["details"]
+        }
+        assert "PRIVATE_SENTINEL" not in rejected.text
+        assert (await owner.get(f"{base}/draft")).json()["revision"] == 2
+        # Existing invalid drafts remain readable and can be diagnosed and corrected.
+        async with unit_of_work(app.state.session_factory, organization_id=UUID(org_id)) as db:
+            draft = await db.scalar(select(AgentDraft).where(AgentDraft.agent_id == UUID(agent_id)))
+            assert draft is not None
+            draft.configuration = body["config"]
+            draft.revision = 3
         validation = await owner.post(f"{base}/draft/validate", json={"revision": 3})
         assert validation.status_code == 200
         assert {"duplicate_across_splits", "invalid_regex"} <= {
@@ -190,11 +205,48 @@ async def test_lease_fencing_permissions_and_atomic_draft_save(app):
         }
         assert "PRIVATE_SENTINEL" not in validation.text
         body["config"]["slots"] = []
+        body["config"]["entities"][0]["pattern"] = r"\d+"
+        body["config"]["examples"][1]["text"] = "Другая фраза"
         assert (
             await owner.put(
                 f"{base}/draft", json=body, headers={**headers(final_grant), "If-Match": '"rev-3"'}
             )
         ).status_code == 200
+        invalid_reference = deepcopy(body)
+        invalid_reference["config"]["examples"][1]["intent_id"] = str(uuid4())
+        bad = await owner.put(
+            f"{base}/draft",
+            json=invalid_reference,
+            headers={**headers(final_grant), "If-Match": '"rev-4"'},
+        )
+        assert bad.status_code == 422
+        assert any(issue["code"] == "unknown_intent" for issue in bad.json()["error"]["details"])
+        coerced_boolean = deepcopy(body)
+        coerced_boolean["config"]["intents"][0]["enabled"] = "yes"
+        assert (
+            await owner.put(
+                f"{base}/draft",
+                json=coerced_boolean,
+                headers={**headers(final_grant), "If-Match": '"rev-4"'},
+            )
+        ).status_code == 422
+        assert (await owner.get(f"{base}/draft")).json()["revision"] == 4
+        dataset = await owner.get(f"{base}/draft/dataset")
+        assert dataset.status_code == 200 and dataset.json()["revision"] == 4
+        assert dataset.json()["dataset"]["intents"][0]["enabled"] is True
+        unknown_field = deepcopy(body)
+        unknown_field["config"]["intents"][0]["PRIVATE_FIELD"] = "PRIVATE_VALUE"
+        bad = await owner.put(
+            f"{base}/draft",
+            json=unknown_field,
+            headers={**headers(final_grant), "If-Match": '"rev-4"'},
+        )
+        assert (
+            bad.status_code == 422
+            and "PRIVATE_FIELD" not in bad.text
+            and "PRIVATE_VALUE" not in bad.text
+        )
+        assert any("<unknown>" in item["path"] for item in bad.json()["error"]["details"])
         copied = await owner.post(f"{base}/copy", json={"name": "Copy", "slug": "copy"})
         assert copied.status_code == 201
         clone_id = copied.json()["id"]
@@ -204,3 +256,10 @@ async def test_lease_fencing_permissions_and_atomic_draft_save(app):
         assert clone["intents"][0]["id"] != first
         assert clone["examples"][0]["intent_id"] == clone["intents"][0]["id"]
         assert clone["examples"][0]["text"] == "PRIVATE_SENTINEL"
+        async with unit_of_work(app.state.session_factory, organization_id=UUID(org_id)) as db:
+            draft = await db.scalar(select(AgentDraft).where(AgentDraft.agent_id == UUID(agent_id)))
+            assert draft is not None
+            draft.configuration = unknown_field["config"]
+        assert (await owner.get(f"{base}/draft")).status_code == 200
+        invalid_dataset = await owner.get(f"{base}/draft/dataset")
+        assert invalid_dataset.status_code == 422 and "PRIVATE_FIELD" not in invalid_dataset.text

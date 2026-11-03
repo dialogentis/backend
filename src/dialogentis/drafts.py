@@ -1,3 +1,4 @@
+import asyncio
 import hmac
 import json
 import secrets
@@ -9,8 +10,10 @@ from fastapi import APIRouter, Header, HTTPException, Response
 from pydantic import BaseModel, Field, JsonValue
 
 from dialogentis.agents import agent_and_draft
+from dialogentis.api_errors import DomainValidationError
 from dialogentis.auth.security import VerifiedUser, digest
 from dialogentis.contracts import InputModel, revision_etag
+from dialogentis.datasets.routes import issue_view, validate_configuration
 from dialogentis.dependencies import Database
 from dialogentis.models import AgentDraft, User
 from dialogentis.organizations import audit, organization_context
@@ -230,6 +233,20 @@ async def save_draft(
         raise HTTPException(422, "Некорректные данные черновика") from exc
     if size > 10 * 1024 * 1024:
         raise HTTPException(413, "Черновик превышает 10 МиБ")
+    errors, _ = await asyncio.to_thread(validate_configuration, config)
+    readiness_only = {
+        "insufficient_intents",
+        "insufficient_intent_examples",
+        "insufficient_entity_examples",
+    }
+    blocking = [issue for issue in errors if issue.code not in readiness_only]
+    if blocking:
+        raise DomainValidationError(
+            [
+                {**issue_view(issue).model_dump(), "path": ["body", "config", *issue.path]}
+                for issue in blocking[:1000]
+            ]
+        )
     draft.configuration = config
     draft.schema_version = body.schema_version
     draft.revision += 1

@@ -3,7 +3,7 @@ from typing import Literal
 from uuid import UUID
 
 import re2
-from pydantic import Field
+from pydantic import Field, StrictBool, StrictInt
 
 from dialogentis.contracts import InputModel
 from dialogentis.datasets.validation import (
@@ -20,7 +20,7 @@ class Intent(InputModel):
     code: str = Field(pattern=r"^[a-z][a-z0-9_]{1,63}$")
     name: str = Field(min_length=1, max_length=120)
     description: str = Field(default="", max_length=2000)
-    enabled: bool = True
+    enabled: StrictBool = True
 
 
 class DictionaryValue(InputModel):
@@ -36,13 +36,13 @@ class Entity(InputModel):
     method: Literal["learned", "dictionary", "regex"]
     dictionary: list[DictionaryValue] = Field(default_factory=list)
     pattern: str | None = Field(default=None, max_length=2048)
-    group: int | str = 0
+    group: StrictInt | str = 0
 
 
 class Span(InputModel):
     entity_id: UUID
-    start: int
-    end: int
+    start: StrictInt
+    end: StrictInt
     text: str | None = None
 
 
@@ -50,7 +50,7 @@ class Example(InputModel):
     id: UUID
     text: str = Field(min_length=1, max_length=2000)
     intent_id: UUID | None = None
-    expected_fallback: bool = False
+    expected_fallback: StrictBool = False
     split: Literal["train", "test"]
     spans: list[Span] = Field(default_factory=list)
 

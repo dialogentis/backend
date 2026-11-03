@@ -12,7 +12,7 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException
 
 from dialogentis.agents import router as agents_router
-from dialogentis.api_errors import error_response
+from dialogentis.api_errors import DomainValidationError, error_response
 from dialogentis.auth.routes import router as auth_router
 from dialogentis.auth.security import COOKIE
 from dialogentis.body_limit import BodyLimitMiddleware
@@ -105,6 +105,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 {"path": list(error["loc"]), "code": error["type"], "message": "Invalid value"}
                 for error in exc.errors()
             ],
+        )
+
+    @app.exception_handler(DomainValidationError)
+    async def domain_validation_error(request: Request, exc: DomainValidationError):
+        return error_response(
+            request, 422, "validation_error", "Проверьте данные черновика", exc.details
         )
 
     @app.get("/api/health/live", tags=["health"])
