@@ -15,6 +15,7 @@ from dialogentis.agents import router as agents_router
 from dialogentis.api_errors import error_response
 from dialogentis.auth.routes import router as auth_router
 from dialogentis.auth.security import COOKIE
+from dialogentis.body_limit import BodyLimitMiddleware
 from dialogentis.config import Settings, get_settings
 from dialogentis.contracts import ErrorResponse
 from dialogentis.db import session_factory
@@ -48,6 +49,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     app.state.settings = config
     app.state.session_factory = factory
+    app.add_middleware(BodyLimitMiddleware, max_bytes=config.max_body_bytes)
     app.include_router(auth_router)
     app.include_router(organizations_router)
     app.include_router(deletions_router)
