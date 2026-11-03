@@ -25,8 +25,11 @@ class Job(Base):
     kind: Mapped[str] = mapped_column(String(80))
     status: Mapped[str] = mapped_column(String(16), default="queued")
     attempts: Mapped[int] = mapped_column(default=0)
+    delivery_recoveries: Mapped[int] = mapped_column(default=0)
     cancel_requested: Mapped[bool] = mapped_column(Boolean, default=False)
     error_code: Mapped[str | None] = mapped_column(String(80))
+    execution_token: Mapped[UUID | None] = mapped_column()
+    next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -36,6 +39,7 @@ class Job(Base):
         UniqueConstraint("organization_id", "id"),
         CheckConstraint("status IN ('queued','running','succeeded','failed','cancelled')"),
         CheckConstraint("attempts >= 0"),
+        CheckConstraint("delivery_recoveries >= 0"),
     )
 
 
@@ -53,4 +57,15 @@ class OutboxEvent(Base):
     __table_args__ = (
         ForeignKeyConstraint(["organization_id", "job_id"], ["jobs.organization_id", "jobs.id"]),
         Index("ix_job_outbox_pending", "available_at", postgresql_where=published_at.is_(None)),
+        Index("ix_job_outbox_job_status", "organization_id", "job_id", "published_at"),
+    )
+
+
+class MaintenanceRun(Base):
+    __tablename__ = "maintenance_runs"
+
+    name: Mapped[str] = mapped_column(String(80), primary_key=True)
+    window_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), primary_key=True)
+    completed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
     )

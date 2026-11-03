@@ -1,31 +1,96 @@
-from datetime import UTC, datetime
+import asyncio
+from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from taskiq import Context, TaskiqDepends
 
 from dialogentis.config import get_settings
-from dialogentis.db import session_factory, unit_of_work
+from dialogentis.db import session_factory
 from dialogentis.jobs.broker import broker
-from dialogentis.jobs.models import Job
+from dialogentis.jobs.lifecycle import Apply, Claim, claim, complete, fail, heartbeat
+
+HEARTBEAT_INTERVAL = 10
+
+
+class RetryableJobError(Exception):
+    """A temporary error whose details must not be persisted in job metadata."""
+
+
+Prepare = Callable[[async_sessionmaker[AsyncSession], Claim], Awaitable[Apply]]
+
+
+@dataclass(frozen=True)
+class Handler:
+    prepare: Prepare
+    timeout_seconds: float
+    retryable: bool
+
+
+HANDLERS: dict[str, Handler] = {}
+
+
+async def _watch(factory: async_sessionmaker[AsyncSession], current: Claim) -> bool | None:
+    while True:
+        await asyncio.sleep(HEARTBEAT_INTERVAL)
+        result = await heartbeat(factory, current)
+        if result is not False:
+            return result
+
+
+async def _no_apply(db: AsyncSession, job) -> None:
+    pass
 
 
 async def process_job(
-    factory: async_sessionmaker[AsyncSession], job_id: UUID, organization_id: UUID
+    factory: async_sessionmaker[AsyncSession],
+    job_id: UUID,
+    organization_id: UUID,
+    handlers: Mapping[str, Handler] | None = None,
 ) -> None:
-    async with unit_of_work(factory, organization_id=organization_id) as db:
-        job = await db.scalar(select(Job).where(Job.id == job_id).with_for_update())
-        if job is None or job.status != "queued":
-            return
-        if job.cancel_requested:
-            job.status = "cancelled"
-        else:
-            # No domain handlers are enabled yet; unknown kinds must not be retried forever.
-            job.attempts += 1
-            job.status = "failed"
-            job.error_code = "unsupported_job_kind"
-        job.finished_at = datetime.now(UTC)
+    handlers = HANDLERS if handlers is None else handlers
+    current = await claim(factory, job_id, organization_id, frozenset(handlers))
+    if current is None:
+        return
+    handler = handlers[current.kind]
+    prepare = asyncio.ensure_future(handler.prepare(factory, current))
+    watch = asyncio.create_task(_watch(factory, current))
+
+    async def stop() -> None:
+        for task in (prepare, watch):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(prepare, watch, return_exceptions=True)
+
+    try:
+        async with asyncio.timeout(handler.timeout_seconds):
+            done, _ = await asyncio.wait((prepare, watch), return_when=asyncio.FIRST_COMPLETED)
+            if watch in done:
+                cancelled = watch.result()
+                await stop()
+                if cancelled:
+                    await complete(factory, current, _no_apply)
+                return
+            apply = prepare.result()
+            watch.cancel()
+            await asyncio.gather(watch, return_exceptions=True)
+            await complete(factory, current, apply)
+    except TimeoutError:
+        await stop()
+        await fail(factory, current, error_code="timeout", retryable=handler.retryable)
+    except RetryableJobError:
+        await stop()
+        await fail(factory, current, error_code="temporary_error", retryable=handler.retryable)
+    except SQLAlchemyError:
+        await stop()
+        await fail(factory, current, error_code="database_error", retryable=handler.retryable)
+    except Exception:
+        await stop()
+        await fail(factory, current, error_code="handler_error", retryable=False)
+    finally:
+        await stop()
 
 
 @broker.task(ack_type="manual")

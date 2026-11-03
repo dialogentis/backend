@@ -137,6 +137,41 @@ services:
     depends_on:
       migrate: {condition: service_completed_successfully}
     restart: unless-stopped
+  dispatcher:
+    <<: *app
+    environment:
+      BROKER_URL: ${BROKER_URL:?Run scripts/init_env.py}
+    volumes: [dispatcher-secret:/run/dialogentis-dispatcher:ro]
+    command: [uv, run, --locked, --no-dev, --no-sync, python, -m, dialogentis.jobs.dispatcher]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      rabbitmq: {condition: service_healthy}
+    restart: unless-stopped
+  worker:
+    <<: *app
+    command: [uv, run, --locked, --no-dev, --no-sync, taskiq, worker, 'dialogentis.jobs.tasks:broker', --workers, '1', --ack-type, manual, --max-async-tasks, '1']
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      rabbitmq: {condition: service_healthy}
+    volumes: [artifacts:/app/artifacts]
+    restart: unless-stopped
+  maintenance-worker:
+    <<: *app
+    command: [uv, run, --locked, --no-dev, --no-sync, taskiq, worker, 'dialogentis.jobs.maintenance:broker', --workers, '1', --ack-type, manual, --max-async-tasks, '1']
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      rabbitmq: {condition: service_healthy}
+    volumes: [dispatcher-secret:/run/dialogentis-dispatcher:ro]
+    restart: unless-stopped
+  scheduler:
+    <<: *app
+    environment:
+      BROKER_URL: ${BROKER_URL:?Run scripts/init_env.py}
+    command: [uv, run, --locked, --no-dev, --no-sync, taskiq, scheduler, 'dialogentis.jobs.maintenance:scheduler']
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      rabbitmq: {condition: service_healthy}
+    restart: unless-stopped
   migrate:
     <<: *app
     environment:

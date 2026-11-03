@@ -38,6 +38,60 @@ def test_migrations_can_run_twice_without_schema_drift():
     engine.dispose()
 
 
+def test_job_recovery_upgrade_preserves_existing_job():
+    from sqlalchemy import create_engine
+
+    config = Config("alembic.ini")
+    url = Settings().database_url
+    assert url is not None
+    engine = create_engine(url.get_secret_value().replace("postgresql://", "postgresql+psycopg://"))
+    tenant, job_id, event_id = uuid4(), uuid4(), uuid4()
+    try:
+        command.downgrade(config, "0004")
+        with engine.begin() as connection:
+            connection.execute(
+                text("SELECT set_config('app.organization_id', :tenant, true)"),
+                {"tenant": str(tenant)},
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO jobs (id, organization_id, kind, status, attempts, "
+                    "cancel_requested) "
+                    "VALUES (:id, :tenant, 'existing', 'queued', 0, false)"
+                ),
+                {"id": job_id, "tenant": tenant},
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO job_outbox (id, organization_id, job_id) "
+                    "VALUES (:id, :tenant, :job)"
+                ),
+                {"id": event_id, "tenant": tenant, "job": job_id},
+            )
+        command.upgrade(config, "head")
+        with engine.begin() as connection:
+            connection.execute(
+                text("SELECT set_config('app.organization_id', :tenant, true)"),
+                {"tenant": str(tenant)},
+            )
+            row = connection.execute(
+                text(
+                    "SELECT status, delivery_recoveries, execution_token, next_retry_at "
+                    "FROM jobs WHERE id = :id"
+                ),
+                {"id": job_id},
+            ).one()
+            assert row == ("queued", 0, None, None)
+            assert (
+                connection.scalar(
+                    text("SELECT job_id FROM job_outbox WHERE id = :id"), {"id": event_id}
+                )
+                == job_id
+            )
+    finally:
+        engine.dispose()
+
+
 async def test_rls_composite_foreign_keys_and_pool_reset():
     url = Settings().database_url
     assert url is not None
