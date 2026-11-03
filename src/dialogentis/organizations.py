@@ -19,6 +19,13 @@ from dialogentis.models import Base, Membership, Organization, User
 
 router = APIRouter(prefix="/api/v1", tags=["organizations"])
 Role = Literal["admin", "editor", "viewer"]
+Permission = Literal["manage_members", "manage_admins", "transfer_ownership"]
+ROLE_PERMISSIONS: dict[str, frozenset[Permission]] = {
+    "owner": frozenset({"manage_members", "manage_admins", "transfer_ownership"}),
+    "admin": frozenset({"manage_members"}),
+    "editor": frozenset(),
+    "viewer": frozenset(),
+}
 
 
 class Invitation(Base):
@@ -110,7 +117,12 @@ def org_json(org: Organization) -> dict:
 
 
 async def organization_context(
-    db: Database, user: User, org_id: UUID, roles: tuple[str, ...] = (), *, lock: bool = False
+    db: Database,
+    user: User,
+    org_id: UUID,
+    permission: Permission | None = None,
+    *,
+    lock: bool = False,
 ) -> Membership:
     membership = await db.get(Membership, (org_id, user.id))
     if membership is None:
@@ -130,7 +142,7 @@ async def organization_context(
         )
         if membership is None:
             raise HTTPException(404, "Пространство не найдено")
-    if roles and membership.role not in roles:
+    if permission and permission not in ROLE_PERMISSIONS.get(membership.role, frozenset()):
         raise HTTPException(403, "Недостаточно прав")
     return membership
 
@@ -194,7 +206,7 @@ async def get_organization(org_id: UUID, user: VerifiedUser, db: Database):
 
 @router.get("/organizations/{org_id}/members", response_model=CursorPage[MemberView])
 async def list_members(org_id: UUID, user: VerifiedUser, db: Database):
-    await organization_context(db, user, org_id, ("owner", "admin"))
+    await organization_context(db, user, org_id, "manage_members")
     rows = (
         await db.execute(
             select(Membership, User.email)
@@ -213,12 +225,13 @@ async def list_members(org_id: UUID, user: VerifiedUser, db: Database):
 
 @router.patch("/organizations/{org_id}/members/{user_id}", response_model=MemberRoleView)
 async def set_role(org_id: UUID, user_id: UUID, body: RoleInput, user: VerifiedUser, db: Database):
-    actor = await organization_context(db, user, org_id, ("owner", "admin"), lock=True)
+    actor = await organization_context(db, user, org_id, "manage_members", lock=True)
     target = await db.get(Membership, (org_id, user_id))
     if target is None:
         raise HTTPException(404, "Участник не найден")
     if target.role == "owner" or (
-        actor.role == "admin" and (target.role == "admin" or body.role == "admin")
+        "manage_admins" not in ROLE_PERMISSIONS[actor.role]
+        and (target.role == "admin" or body.role == "admin")
     ):
         raise HTTPException(403, "Изменение этой роли недоступно")
     target.role = body.role
@@ -228,11 +241,13 @@ async def set_role(org_id: UUID, user_id: UUID, body: RoleInput, user: VerifiedU
 
 @router.delete("/organizations/{org_id}/members/{user_id}", status_code=204)
 async def remove_member(org_id: UUID, user_id: UUID, user: VerifiedUser, db: Database):
-    actor = await organization_context(db, user, org_id, ("owner", "admin"), lock=True)
+    actor = await organization_context(db, user, org_id, "manage_members", lock=True)
     target = await db.get(Membership, (org_id, user_id))
     if target is None:
         raise HTTPException(404, "Участник не найден")
-    if target.role == "owner" or (actor.role == "admin" and target.role == "admin"):
+    if target.role == "owner" or (
+        "manage_admins" not in ROLE_PERMISSIONS[actor.role] and target.role == "admin"
+    ):
         raise HTTPException(403, "Удаление этого участника недоступно")
     await db.delete(target)
     audit(db, org_id, user, "member.removed", user_id)
@@ -249,7 +264,7 @@ async def leave(org_id: UUID, user: VerifiedUser, db: Database):
 
 @router.post("/organizations/{org_id}/transfer-ownership", status_code=204)
 async def transfer(org_id: UUID, body: TransferInput, user: VerifiedUser, db: Database):
-    owner = await organization_context(db, user, org_id, ("owner",), lock=True)
+    owner = await organization_context(db, user, org_id, "transfer_ownership", lock=True)
     if not await check_password(user.password_hash, body.password):
         raise HTTPException(403, "Неверный пароль")
     target = await db.get(Membership, (org_id, body.new_owner_user_id))
@@ -302,8 +317,8 @@ async def send_invitation(
 async def invite(
     org_id: UUID, body: InvitationInput, request: Request, user: VerifiedUser, db: Database
 ):
-    actor = await organization_context(db, user, org_id, ("owner", "admin"), lock=True)
-    if actor.role == "admin" and body.role == "admin":
+    actor = await organization_context(db, user, org_id, "manage_members", lock=True)
+    if "manage_admins" not in ROLE_PERMISSIONS[actor.role] and body.role == "admin":
         raise HTTPException(403, "Назначение администраторов доступно владельцу")
     email = str(body.email).casefold()
     await rate_limit(db, request, "invitation", f"{org_id}:{email}", 3, 60)
@@ -324,7 +339,9 @@ async def invite(
             )
         )
     ).all()
-    if actor.role == "admin" and any(item.role == "admin" for item in previous):
+    if "manage_admins" not in ROLE_PERMISSIONS[actor.role] and any(
+        item.role == "admin" for item in previous
+    ):
         raise HTTPException(403, "Управление администраторами доступно владельцу")
     for item in previous:
         item.revoked = True
@@ -341,7 +358,7 @@ async def invite(
 
 @router.get("/organizations/{org_id}/invitations", response_model=CursorPage[InvitationView])
 async def list_invitations(org_id: UUID, user: VerifiedUser, db: Database):
-    await organization_context(db, user, org_id, ("owner", "admin"))
+    await organization_context(db, user, org_id, "manage_members")
     rows = (
         await db.scalars(
             select(Invitation)
@@ -354,11 +371,11 @@ async def list_invitations(org_id: UUID, user: VerifiedUser, db: Database):
 
 @router.delete("/organizations/{org_id}/invitations/{invitation_id}", status_code=204)
 async def revoke(org_id: UUID, invitation_id: UUID, user: VerifiedUser, db: Database):
-    actor = await organization_context(db, user, org_id, ("owner", "admin"), lock=True)
+    actor = await organization_context(db, user, org_id, "manage_members", lock=True)
     invitation = await db.get(Invitation, invitation_id)
     if invitation is None:
         raise HTTPException(404, "Приглашение не найдено")
-    if actor.role == "admin" and invitation.role == "admin":
+    if "manage_admins" not in ROLE_PERMISSIONS[actor.role] and invitation.role == "admin":
         raise HTTPException(403, "Управление администраторами доступно владельцу")
     invitation.revoked = True
     audit(db, org_id, user, "invitation.revoked", invitation_id)
@@ -398,13 +415,13 @@ async def accept(body: AcceptInput, user: VerifiedUser, db: Database):
 async def resend_invitation(
     org_id: UUID, invitation_id: UUID, request: Request, user: VerifiedUser, db: Database
 ):
-    actor = await organization_context(db, user, org_id, ("owner", "admin"), lock=True)
+    actor = await organization_context(db, user, org_id, "manage_members", lock=True)
     invitation = await db.get(Invitation, invitation_id)
     if invitation is None:
         raise HTTPException(404, "Приглашение не найдено")
     if invitation.revoked or invitation.consumed_at is not None:
         raise HTTPException(409, "Приглашение уже отозвано или принято")
-    if actor.role == "admin" and invitation.role == "admin":
+    if "manage_admins" not in ROLE_PERMISSIONS[actor.role] and invitation.role == "admin":
         raise HTTPException(403, "Управление администраторами доступно владельцу")
     await rate_limit(db, request, "invitation", f"{org_id}:{invitation.email}", 3, 60)
     org = await db.get(Organization, org_id)

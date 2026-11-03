@@ -134,6 +134,56 @@ async def test_rate_limit_persists_failed_attempts(app):
         assert '"input"' not in result.text
 
 
+@pytest.mark.parametrize("role,can_manage", [("viewer", False), ("editor", False), ("admin", True)])
+async def test_roles_are_scoped_to_each_organization(app, role, can_manage):
+    async with client_for(app) as owner, client_for(app) as member:
+        _, owner_id = await account(app, owner)
+        email, member_id = await account(app, member)
+        first = await owner.post(
+            "/api/v1/organizations", json={"name": "Команда A", "slug": f"org-{uuid4()}"}
+        )
+        second = await member.post(
+            "/api/v1/organizations", json={"name": "Команда B", "slug": f"org-{uuid4()}"}
+        )
+        assert first.status_code == second.status_code == 201
+        first_id, second_id = first.json()["id"], second.json()["id"]
+        assert (await owner.get(f"/api/v1/organizations/{second_id}")).status_code == 404
+        assert (await member.get(f"/api/v1/organizations/{first_id}")).status_code == 404
+        invite = await owner.post(
+            f"/api/v1/organizations/{first_id}/invitations", json={"email": email, "role": role}
+        )
+        assert invite.status_code == 201
+        token = await mail_token(app, email, "Приглашение")
+        assert (
+            await member.post("/api/v1/invitations/accept", json={"token": token})
+        ).status_code == 200
+        orgs = {
+            item["id"]: item["role"]
+            for item in (await member.get("/api/v1/organizations")).json()["items"]
+        }
+        assert orgs == {first_id: role, second_id: "owner"}
+        assert (await member.get(f"/api/v1/organizations/{first_id}/members")).status_code == (
+            200 if can_manage else 403
+        )
+        assert (await member.get(f"/api/v1/organizations/{second_id}/members")).status_code == 200
+        request = await member.post(
+            f"/api/v1/organizations/{first_id}/invitations",
+            json={"email": f"next-{uuid4()}@example.com", "role": "viewer"},
+        )
+        assert request.status_code == (201 if can_manage else 403)
+        assert (
+            await member.post(
+                f"/api/v1/organizations/{first_id}/transfer-ownership",
+                json={"new_owner_user_id": owner_id, "password": PASSWORD},
+            )
+        ).status_code == 403
+        assert (
+            await owner.delete(f"/api/v1/organizations/{first_id}/members/{member_id}")
+        ).status_code == 204
+        assert (await member.get(f"/api/v1/organizations/{first_id}")).status_code == 404
+        assert (await member.get(f"/api/v1/organizations/{second_id}")).json()["role"] == "owner"
+
+
 async def test_invitations_roles_and_transfer(app):
     async with client_for(app) as owner, client_for(app) as guest:
         _, owner_id = await account(app, owner)
