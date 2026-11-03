@@ -1,8 +1,9 @@
+from copy import deepcopy
 from typing import Annotated, Literal
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Header, HTTPException, Query, Response
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator
 from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
 
@@ -45,6 +46,19 @@ class AgentPatch(InputModel):
     def nonnull_description(cls, value: str | None) -> str:
         if value is None:
             raise ValueError("Description must not be null")
+        return value
+
+
+class AgentCopy(InputModel):
+    name: str = Field(min_length=1, max_length=120)
+    slug: str = Field(pattern=r"^[a-z][a-z0-9-]{1,63}$")
+
+    @field_validator("name")
+    @classmethod
+    def nonempty_name(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Name must not be blank")
         return value
 
 
@@ -194,6 +208,96 @@ async def get_agent(
     agent, draft = await agent_and_draft(db, org_id, agent_id)
     response.headers["ETag"] = revision_etag(agent.revision)
     return view(agent, draft)
+
+
+def copy_config(config: dict) -> dict:
+    """Copy only configurations whose internal references are understood."""
+    from dialogentis.drafts import DraftConfig
+
+    try:
+        result = DraftConfig.model_validate(config).model_dump(mode="json")
+    except ValidationError as exc:
+        raise HTTPException(409, "Нельзя скопировать некорректный черновик") from exc
+    flow = result["flow"]
+    allowed = {
+        "start": set(),
+        "switch_intent": set(),
+        "fallback": {"resume_node_id", "text"},
+        "say": {"text"},
+        "end": {"text"},
+    }
+    if any(result[key] for key in ("intents", "entities", "examples", "slots")) or flow["layout"]:
+        raise HTTPException(409, "Копирование этого черновика пока недоступно")
+    if any(
+        node["type"] not in allowed or set(node["config"]) - allowed[node["type"]]
+        for node in flow["nodes"]
+    ):
+        raise HTTPException(409, "Копирование этого черновика пока недоступно")
+    node_ids = [node["id"] for node in flow["nodes"]]
+    edge_ids = [edge["id"] for edge in flow["edges"]]
+    if len(node_ids) != len(set(node_ids)) or len(edge_ids) != len(set(edge_ids)):
+        raise HTTPException(409, "Нельзя скопировать сценарий с повторяющимися идентификаторами")
+    mapping = {identifier: str(uuid4()) for identifier in node_ids}
+    if any(
+        edge["source"] not in mapping or edge["target"] not in mapping for edge in flow["edges"]
+    ):
+        raise HTTPException(409, "Нельзя скопировать сценарий с отсутствующими блоками")
+    node_types = {node["id"]: node["type"] for node in flow["nodes"]}
+    outputs = {"start": {"next"}, "say": {"next"}, "switch_intent": {"fallback"}}
+    handles = [(edge["source"], edge["source_handle"]) for edge in flow["edges"]]
+    if len(handles) != len(set(handles)) or any(
+        edge["source_handle"] not in outputs.get(node_types[edge["source"]], set())
+        for edge in flow["edges"]
+    ):
+        raise HTTPException(409, "Копирование этого сценария пока недоступно")
+    for node in flow["nodes"]:
+        if "text" in node["config"] and not isinstance(node["config"]["text"], str):
+            raise HTTPException(409, "Нельзя скопировать некорректный текст блока")
+        reference = node["config"].get("resume_node_id")
+        if "resume_node_id" in node["config"] and (
+            not isinstance(reference, str) or reference not in mapping
+        ):
+            raise HTTPException(409, "Нельзя скопировать сценарий с отсутствующими блоками")
+    clone = deepcopy(result)
+    clone["flow"]["flow_id"] = str(uuid4())
+    for node in clone["flow"]["nodes"]:
+        node["id"] = mapping[node["id"]]
+        if "resume_node_id" in node["config"]:
+            node["config"]["resume_node_id"] = mapping[node["config"]["resume_node_id"]]
+    for edge in clone["flow"]["edges"]:
+        edge["id"] = str(uuid4())
+        edge["source"] = mapping[edge["source"]]
+        edge["target"] = mapping[edge["target"]]
+    return clone
+
+
+@router.post("/{agent_id}/copy", status_code=201, response_model=AgentView)
+async def copy_agent(
+    org_id: UUID,
+    agent_id: UUID,
+    body: AgentCopy,
+    user: VerifiedUser,
+    db: Database,
+    response: Response,
+):
+    await organization_context(db, user, org_id, "manage_agents", lock=True)
+    original, original_draft = await agent_and_draft(db, org_id, agent_id)
+    configuration = copy_config(original_draft.configuration)
+    clone = Agent(
+        organization_id=org_id, name=body.name, slug=body.slug, description=original.description
+    )
+    try:
+        async with db.begin_nested():
+            db.add(clone)
+            await db.flush()
+    except IntegrityError as exc:
+        raise HTTPException(409, "Адрес агента уже занят") from exc
+    draft = AgentDraft(organization_id=org_id, agent_id=clone.id, configuration=configuration)
+    db.add(draft)
+    await db.flush()
+    audit(db, org_id, user, "agent.copied", clone.id)
+    response.headers["ETag"] = revision_etag(clone.revision)
+    return view(clone, draft)
 
 
 @router.patch("/{agent_id}", response_model=AgentView)

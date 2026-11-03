@@ -71,6 +71,9 @@ async def test_agent_metadata_roles_isolation_and_optimistic_concurrency(app):
         assert (await owner.post(base, json={**body, "name": "   "})).status_code == 422
         assert (await member.get(f"{base}/{agent_id}")).status_code == 200
         assert (
+            await member.post(f"{base}/{agent_id}/copy", json={"name": "Copy", "slug": "copy"})
+        ).status_code == 403
+        assert (
             await owner.get(f"/api/v1/organizations/{other_id}/agents/{agent_id}")
         ).status_code == 404
         assert (
@@ -117,3 +120,38 @@ async def test_agent_metadata_roles_isolation_and_optimistic_concurrency(app):
         )
         assert (await owner.get(base, params={"q": "%"})).json()["items"] == []
         assert (await owner.get(base, params={"status": "archived"})).json()["items"] == []
+        source = (await owner.get(f"{base}/{agent_id}/draft")).json()["config"]
+        copied = await member.post(f"{base}/{agent_id}/copy", json={"name": "Copy", "slug": "copy"})
+        assert copied.status_code == 201 and copied.json()["draft_revision"] == 1
+        clone_id = copied.json()["id"]
+        cloned = (await owner.get(f"{base}/{clone_id}/draft")).json()["config"]
+        old_nodes = {node["id"]: node for node in source["flow"]["nodes"]}
+        new_nodes = {node["id"]: node for node in cloned["flow"]["nodes"]}
+        assert not set(old_nodes) & set(new_nodes)
+        assert source["flow"]["flow_id"] != cloned["flow"]["flow_id"]
+        assert {node["type"] for node in old_nodes.values()} == {
+            node["type"] for node in new_nodes.values()
+        }
+        assert not {edge["id"] for edge in source["flow"]["edges"]} & {
+            edge["id"] for edge in cloned["flow"]["edges"]
+        }
+        assert all(
+            edge["source"] in new_nodes and edge["target"] in new_nodes
+            for edge in cloned["flow"]["edges"]
+        )
+        fallback = next(node for node in new_nodes.values() if node["type"] == "fallback")
+        assert new_nodes[fallback["config"]["resume_node_id"]]["type"] == "switch_intent"
+        assert (
+            await owner.post(f"{base}/{agent_id}/copy", json={"name": "Copy", "slug": "copy"})
+        ).status_code == 409
+        async with unit_of_work(app.state.session_factory, organization_id=UUID(org_id)) as db:
+            draft = await db.scalar(select(AgentDraft).where(AgentDraft.agent_id == UUID(agent_id)))
+            assert draft is not None
+            draft.configuration = {
+                **draft.configuration,
+                "slots": [{"id": str(uuid4()), "code": "city"}],
+            }
+        assert (
+            await owner.post(f"{base}/{agent_id}/copy", json={"name": "Unsafe", "slug": "unsafe"})
+        ).status_code == 409
+        assert len((await owner.get(base)).json()["items"]) == 3
