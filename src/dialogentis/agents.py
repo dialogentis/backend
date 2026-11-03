@@ -212,10 +212,14 @@ async def get_agent(
 
 def copy_config(config: dict) -> dict:
     """Copy only configurations whose internal references are understood."""
+    from dialogentis.datasets.schema import Dataset
     from dialogentis.drafts import DraftConfig
 
     try:
         result = DraftConfig.model_validate(config).model_dump(mode="json")
+        dataset = Dataset.model_validate(
+            {key: result[key] for key in ("intents", "entities", "examples")}
+        )
     except ValidationError as exc:
         raise HTTPException(409, "Нельзя скопировать некорректный черновик") from exc
     flow = result["flow"]
@@ -226,7 +230,7 @@ def copy_config(config: dict) -> dict:
         "say": {"text"},
         "end": {"text"},
     }
-    if any(result[key] for key in ("intents", "entities", "examples", "slots")) or flow["layout"]:
+    if result["slots"] or flow["layout"]:
         raise HTTPException(409, "Копирование этого черновика пока недоступно")
     if any(
         node["type"] not in allowed or set(node["config"]) - allowed[node["type"]]
@@ -258,7 +262,31 @@ def copy_config(config: dict) -> dict:
             not isinstance(reference, str) or reference not in mapping
         ):
             raise HTTPException(409, "Нельзя скопировать сценарий с отсутствующими блоками")
+    identifiers = {
+        "intents": [item.id for item in dataset.intents],
+        "entities": [item.id for item in dataset.entities],
+        "examples": [item.id for item in dataset.examples],
+    }
+    if any(len(ids) != len(set(ids)) for ids in identifiers.values()):
+        raise HTTPException(409, "Нельзя скопировать данные с повторяющимися идентификаторами")
+    data_mapping = {
+        key: {identifier: str(uuid4()) for identifier in ids} for key, ids in identifiers.items()
+    }
+    if any(
+        (example.intent_id is not None and example.intent_id not in data_mapping["intents"])
+        or any(span.entity_id not in data_mapping["entities"] for span in example.spans)
+        for example in dataset.examples
+    ):
+        raise HTTPException(409, "Нельзя скопировать данные с отсутствующими ссылками")
     clone = deepcopy(result)
+    for key in ("intents", "entities", "examples"):
+        for item in clone[key]:
+            item["id"] = data_mapping[key][UUID(item["id"])]
+            if key == "examples":
+                if item.get("intent_id") is not None:
+                    item["intent_id"] = data_mapping["intents"][UUID(item["intent_id"])]
+                for span in item.get("spans", []):
+                    span["entity_id"] = data_mapping["entities"][UUID(span["entity_id"])]
     clone["flow"]["flow_id"] = str(uuid4())
     for node in clone["flow"]["nodes"]:
         node["id"] = mapping[node["id"]]

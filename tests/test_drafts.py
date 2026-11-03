@@ -189,3 +189,18 @@ async def test_lease_fencing_permissions_and_atomic_draft_save(app):
             item["code"] for item in validation.json()["errors"]
         }
         assert "PRIVATE_SENTINEL" not in validation.text
+        body["config"]["slots"] = []
+        assert (
+            await owner.put(
+                f"{base}/draft", json=body, headers={**headers(final_grant), "If-Match": '"rev-3"'}
+            )
+        ).status_code == 200
+        copied = await owner.post(f"{base}/copy", json={"name": "Copy", "slug": "copy"})
+        assert copied.status_code == 201
+        clone_id = copied.json()["id"]
+        clone = (await owner.get(f"/api/v1/organizations/{org_id}/agents/{clone_id}/draft")).json()[
+            "config"
+        ]
+        assert clone["intents"][0]["id"] != first
+        assert clone["examples"][0]["intent_id"] == clone["intents"][0]["id"]
+        assert clone["examples"][0]["text"] == "PRIVATE_SENTINEL"
