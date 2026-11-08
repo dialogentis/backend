@@ -130,7 +130,7 @@ services:
       deletion-replay: {condition: service_completed_successfully}
       rabbitmq: {condition: service_healthy}
       mailpit: {condition: service_started}
-    volumes: [dispatcher-secret:/run/dialogentis-dispatcher:ro, deletion-journal:/app/deletion-journal]
+    volumes: [dispatcher-secret:/run/dialogentis-dispatcher:ro, deletion-journal:/app/deletion-journal, artifacts:/app/artifacts]
   mailer:
     <<: *app
     networks: [internal, edge]
@@ -185,7 +185,7 @@ services:
   deletion-replay:
     <<: *app
     command: [uv, run, --locked, --no-dev, --no-sync, python, -m, dialogentis.replay_deletions]
-    volumes: [deletion-journal:/app/deletion-journal:ro]
+    volumes: [deletion-journal:/app/deletion-journal:ro, artifacts:/app/artifacts]
     depends_on:
       migrate: {condition: service_completed_successfully}
 

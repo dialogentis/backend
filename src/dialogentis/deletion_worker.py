@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from dialogentis.artifacts import ArtifactStorage
 from dialogentis.auth.models import EmailOutbox
 from dialogentis.config import get_settings
 from dialogentis.db import unit_of_work
@@ -31,6 +32,12 @@ async def purge_tenant(
             or record.job_id != expected_job_id
         ):
             raise ValueError("Invalid deletion state")
+    try:
+        await asyncio.to_thread(
+            ArtifactStorage(get_settings().artifact_root).purge_organization, organization_id
+        )
+    except OSError as exc:
+        raise RetryableJobError("Artifact storage is unavailable") from exc
     keep_job_id = record.job_id if record is not None else None
     outbox = delete(OutboxEvent).where(OutboxEvent.organization_id == organization_id)
     jobs = delete(Job).where(Job.organization_id == organization_id)

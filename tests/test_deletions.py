@@ -9,6 +9,7 @@ from cryptography.fernet import Fernet
 from sqlalchemy import delete, select
 
 from dialogentis.api import create_app
+from dialogentis.artifacts import ArtifactStorage
 from dialogentis.auth.models import EmailOutbox
 from dialogentis.config import Settings, get_settings
 from dialogentis.db import unit_of_work
@@ -45,6 +46,9 @@ async def test_deletion_is_atomic_authorized_and_replayed_after_restore(app, tmp
     from dialogentis.jobs.tasks import process_job
 
     monkeypatch.setenv("DELETION_JOURNAL_ROOT", str(tmp_path))
+    artifact_root = tmp_path / "artifacts"
+    artifact_root.mkdir()
+    monkeypatch.setenv("ARTIFACT_ROOT", str(artifact_root))
     get_settings.cache_clear()
     async with (
         client_for(app) as owner,
@@ -68,6 +72,10 @@ async def test_deletion_is_atomic_authorized_and_replayed_after_restore(app, tmp
         )
         assert first.status_code == second.status_code == 201
         org_id, other_id = UUID(first.json()["id"]), UUID(second.json()["id"])
+        storage = ArtifactStorage(artifact_root)
+        file_id, other_file_id = uuid4(), uuid4()
+        storage.write(org_id, file_id, [b"delete me"], max_bytes=100)
+        other_info = storage.write(other_id, other_file_id, [b"keep me"], max_bytes=100)
         invitation = await owner.post(
             f"/api/v1/organizations/{org_id}/invitations",
             json={"email": guest_email, "role": "viewer"},
@@ -157,6 +165,8 @@ async def test_deletion_is_atomic_authorized_and_replayed_after_restore(app, tmp
         assert (await owner.post(retry, json={"password": PASSWORD})).json()["status"] == "queued"
         assert (await owner.post(retry, json={"password": PASSWORD})).json()["status"] == "queued"
         await process_job(app.state.session_factory, job_id, org_id)
+        assert not (artifact_root / str(org_id)).exists()
+        assert storage.read(other_id, other_file_id, other_info, max_bytes=100) == b"keep me"
         async with unit_of_work(app.state.session_factory, organization_id=org_id) as db:
             events = (
                 await db.scalars(select(OutboxEvent).where(OutboxEvent.job_id == job_id))
@@ -194,7 +204,9 @@ async def test_deletion_is_atomic_authorized_and_replayed_after_restore(app, tmp
             await db.flush()
             db.add(Membership(organization_id=org_id, user_id=owner_id, role="owner"))
             db.add(Agent(id=uuid4(), organization_id=org_id, name="Old", slug="old"))
+        storage.write(org_id, file_id, [b"restored"], max_bytes=100)
         assert await replay(app.state.session_factory, tmp_path, key.get_secret_value()) == 1
+        assert not (artifact_root / str(org_id)).exists()
         assert await replay(app.state.session_factory, tmp_path, key.get_secret_value()) == 1
         async with unit_of_work(app.state.session_factory, organization_id=org_id) as db:
             assert await db.get(Organization, org_id) is None
@@ -246,6 +258,43 @@ async def test_journal_failure_retries_without_deleting_data(app, tmp_path, monk
             assert await db.get(Organization, org_id) is None
             job = await db.get(Job, job_id)
             assert job is not None and job.status == "succeeded" and job.attempts == 2
+            for event in (
+                await db.scalars(select(OutboxEvent).where(OutboxEvent.job_id == job_id))
+            ).all():
+                event.published_at = datetime.now(UTC)
+
+
+async def test_artifact_failure_retries_without_deleting_database(app, tmp_path, monkeypatch):
+    from dialogentis.jobs.tasks import process_job
+
+    monkeypatch.setenv("DELETION_JOURNAL_ROOT", str(tmp_path / "journal"))
+    artifact_root = tmp_path / "unavailable"
+    monkeypatch.setenv("ARTIFACT_ROOT", str(artifact_root))
+    get_settings.cache_clear()
+    async with client_for(app) as owner:
+        await account(app, owner)
+        response = await owner.post(
+            "/api/v1/organizations",
+            json={"name": "Удалить после повтора", "slug": f"org-{uuid4()}"},
+        )
+        org_id = UUID(response.json()["id"])
+        result = await owner.post(
+            f"/api/v1/organizations/{org_id}/deletion",
+            json={"password": PASSWORD, "confirmation_name": "Удалить после повтора"},
+        )
+        job_id = UUID(result.json()["job_id"])
+        await process_job(app.state.session_factory, job_id, org_id)
+        async with unit_of_work(app.state.session_factory, organization_id=org_id) as db:
+            org, job = await db.get(Organization, org_id), await db.get(Job, job_id)
+            assert org is not None and job is not None
+            assert job.status == "queued" and job.error_code == "temporary_error"
+            job.next_retry_at = datetime.now(UTC) - timedelta(seconds=1)
+        artifact_root.mkdir()
+        await process_job(app.state.session_factory, job_id, org_id)
+        async with unit_of_work(app.state.session_factory, organization_id=org_id) as db:
+            assert await db.get(Organization, org_id) is None
+            job = await db.get(Job, job_id)
+            assert job is not None and job.status == "succeeded"
             for event in (
                 await db.scalars(select(OutboxEvent).where(OutboxEvent.job_id == job_id))
             ).all():
