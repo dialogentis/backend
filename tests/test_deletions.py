@@ -9,6 +9,8 @@ from cryptography.fernet import Fernet
 from sqlalchemy import delete, select
 
 from dialogentis.api import create_app
+from dialogentis.artifact_records import Artifact
+from dialogentis.artifact_service import reserve_artifact, write_artifact
 from dialogentis.artifacts import ArtifactStorage
 from dialogentis.auth.models import EmailOutbox
 from dialogentis.config import Settings, get_settings
@@ -76,6 +78,14 @@ async def test_deletion_is_atomic_authorized_and_replayed_after_restore(app, tmp
         file_id, other_file_id = uuid4(), uuid4()
         storage.write(org_id, file_id, [b"delete me"], max_bytes=100)
         other_info = storage.write(other_id, other_file_id, [b"keep me"], max_bytes=100)
+        async with unit_of_work(app.state.session_factory, organization_id=org_id) as db:
+            tracked_id = (
+                await reserve_artifact(
+                    db, org_id, kind="temporary", max_bytes=100, settings=get_settings()
+                )
+            ).id
+        async with unit_of_work(app.state.session_factory, organization_id=org_id) as db:
+            await write_artifact(db, storage, org_id, tracked_id, [b"tracked"])
         invitation = await owner.post(
             f"/api/v1/organizations/{org_id}/invitations",
             json={"email": guest_email, "role": "viewer"},
@@ -183,6 +193,7 @@ async def test_deletion_is_atomic_authorized_and_replayed_after_restore(app, tmp
             assert await db.get(Organization, org_id) is None
             assert (await db.scalars(select(Agent))).all() == []
             assert (await db.scalars(select(AgentDraft))).all() == []
+            assert (await db.scalars(select(Artifact))).all() == []
             assert (
                 await db.scalars(select(Membership).where(Membership.organization_id == org_id))
             ).all() == []

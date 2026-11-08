@@ -6,6 +6,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from taskiq import Context, TaskiqDepends, TaskiqScheduler
 from taskiq.schedule_sources import LabelScheduleSource
 
+from dialogentis.artifact_records import Artifact
+from dialogentis.artifact_service import ArtifactUnavailable, cleanup_expired
+from dialogentis.artifacts import ArtifactStorage
 from dialogentis.config import get_settings
 from dialogentis.db import session_factory, unit_of_work
 from dialogentis.jobs.broker import create_broker
@@ -28,9 +31,22 @@ async def reconcile_once(
             return False
         async with dispatch_factory() as db:
             organizations = (await db.scalars(select(OutboxEvent.organization_id).distinct())).all()
+            artifact_organizations = (
+                await db.scalars(select(Artifact.organization_id).distinct())
+            ).all()
         for organization_id in organizations:
             for _ in range(10):
                 if await recover_tenant(factory, organization_id, retryable_kinds) < 100:
+                    break
+        storage = ArtifactStorage(get_settings().artifact_root)
+        for organization_id in artifact_organizations:
+            for _ in range(10):
+                try:
+                    async with unit_of_work(factory, organization_id=organization_id) as db:
+                        removed = await cleanup_expired(db, storage, organization_id)
+                except ArtifactUnavailable:
+                    break
+                if removed < 100:
                     break
         guard.add(MaintenanceRun(name="jobs.reconcile", window_start=window))
         await guard.execute(

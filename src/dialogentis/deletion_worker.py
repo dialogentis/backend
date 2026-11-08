@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from dialogentis.artifact_records import Artifact
 from dialogentis.artifacts import ArtifactStorage
 from dialogentis.auth.models import EmailOutbox
 from dialogentis.config import get_settings
@@ -39,6 +40,7 @@ async def purge_tenant(
     except OSError as exc:
         raise RetryableJobError("Artifact storage is unavailable") from exc
     keep_job_id = record.job_id if record is not None else None
+    await db.execute(delete(Artifact).where(Artifact.organization_id == organization_id))
     outbox = delete(OutboxEvent).where(OutboxEvent.organization_id == organization_id)
     jobs = delete(Job).where(Job.organization_id == organization_id)
     if keep_job_id is not None:

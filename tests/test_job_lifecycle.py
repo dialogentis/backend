@@ -6,6 +6,9 @@ from uuid import uuid4
 import pytest
 from sqlalchemy import delete, select
 
+from dialogentis.artifact_records import Artifact
+from dialogentis.artifact_service import reserve_artifact, write_artifact
+from dialogentis.artifacts import ArtifactStorage
 from dialogentis.config import Settings
 from dialogentis.db import session_factory, unit_of_work
 from dialogentis.jobs.dispatcher import dispatcher_factory
@@ -40,6 +43,7 @@ async def factory():
     yield value, tenants
     for organization_id in tenants:
         async with unit_of_work(value, organization_id=organization_id) as db:
+            await db.execute(delete(Artifact))
             await db.execute(delete(OutboxEvent))
             await db.execute(delete(Job))
             await db.execute(delete(Organization).where(Organization.id == organization_id))
@@ -416,7 +420,17 @@ async def test_scheduled_maintenance_task_runs_in_worker(factory, tmp_path):
     org_id = uuid4()
     tenants.append(org_id)
     async with unit_of_work(factory, organization_id=org_id) as db:
+        db.add(Organization(id=org_id, name="Test", slug=f"org-{uuid4()}"))
+        await db.flush()
         job_id = enqueue(db, org_id, "training").id
+    storage = ArtifactStorage(tmp_path)
+    async with unit_of_work(factory, organization_id=org_id) as db:
+        artifact_id = (
+            await reserve_artifact(db, org_id, kind="temporary", max_bytes=10, settings=Settings())
+        ).id
+    async with unit_of_work(factory, organization_id=org_id) as db:
+        artifact = await write_artifact(db, storage, org_id, artifact_id, [b"expired"])
+        artifact.expires_at = datetime.now(UTC) - timedelta(seconds=1)
     current = await claim(factory, job_id, org_id, frozenset({"training"}))
     assert current is not None
     async with unit_of_work(factory, organization_id=org_id) as db:
@@ -443,7 +457,7 @@ async def test_scheduled_maintenance_task_runs_in_worker(factory, tmp_path):
             "manual",
             "--max-async-tasks",
             "1",
-            env=os.environ.copy(),
+            env={**os.environ, "ARTIFACT_ROOT": str(tmp_path)},
             stdout=log,
             stderr=log,
         )
@@ -465,8 +479,10 @@ async def test_scheduled_maintenance_task_runs_in_worker(factory, tmp_path):
             for _ in range(300):
                 async with unit_of_work(factory, organization_id=org_id) as db:
                     job = await db.get(Job, job_id)
-                    if job is not None and job.status == "failed":
+                    artifact = await db.get(Artifact, artifact_id)
+                    if job is not None and job.status == "failed" and artifact is None:
                         assert job.error_code == "worker_lost"
+                        assert not (tmp_path / str(org_id) / str(artifact_id)).exists()
                         break
                 assert worker.returncode is None and scheduler.returncode is None, (
                     log_path.read_text()

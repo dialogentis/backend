@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import Literal
 
 from cryptography.fernet import Fernet
-from pydantic import SecretStr, model_validator
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -19,6 +19,8 @@ class Settings(BaseSettings):
     encryption_key: SecretStr | None = None
     encryption_key_version: int = 1
     artifact_root: Path = Path("artifacts")
+    artifact_quota_bytes: int = Field(default=2 * 1024**3, gt=0)
+    temporary_artifact_quota_bytes: int = Field(default=100 * 1024**2, gt=0)
     deletion_journal_root: Path = Path("deletion-journal")
     smtp_host: str | None = None
     smtp_port: int = 1025

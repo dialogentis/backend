@@ -13,6 +13,8 @@ x-app: &app
     ENCRYPTION_KEY: ${ENCRYPTION_KEY:?Run scripts/init_env.py}
     ENCRYPTION_KEY_VERSION: ${ENCRYPTION_KEY_VERSION:-1}
     ARTIFACT_ROOT: /app/artifacts
+    ARTIFACT_QUOTA_BYTES: ${ARTIFACT_QUOTA_BYTES:-2147483648}
+    TEMPORARY_ARTIFACT_QUOTA_BYTES: ${TEMPORARY_ARTIFACT_QUOTA_BYTES:-104857600}
     DELETION_JOURNAL_ROOT: /app/deletion-journal
     SMTP_HOST: ${SMTP_HOST:-mailpit}
     SMTP_PORT: ${SMTP_PORT:-1025}
@@ -162,7 +164,7 @@ services:
     depends_on:
       deletion-replay: {condition: service_completed_successfully}
       rabbitmq: {condition: service_healthy}
-    volumes: [dispatcher-secret:/run/dialogentis-dispatcher:ro]
+    volumes: [dispatcher-secret:/run/dialogentis-dispatcher:ro, artifacts:/app/artifacts]
     restart: unless-stopped
   scheduler:
     <<: *app
