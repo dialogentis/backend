@@ -2,13 +2,14 @@ import asyncio
 from typing import Literal
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field, ValidationError
 
 from dialogentis.agents import agent_and_draft
 from dialogentis.api_errors import DomainValidationError
 from dialogentis.auth.security import VerifiedUser
 from dialogentis.contracts import InputModel
+from dialogentis.datasets.preview import Preview, run_preview
 from dialogentis.datasets.schema import Dataset, validate_dataset
 from dialogentis.datasets.validation import Issue
 from dialogentis.dependencies import Database
@@ -69,6 +70,11 @@ class DatasetView(BaseModel):
     dataset: Dataset
 
 
+class PreviewInput(InputModel):
+    revision: int = Field(ge=1)
+    text: str = Field(min_length=1, max_length=2000)
+
+
 def parse_dataset(config: dict) -> Dataset:
     return Dataset.model_validate(
         {key: config.get(key) for key in ("intents", "entities", "examples")}
@@ -121,6 +127,37 @@ async def get_dataset(org_id: UUID, agent_id: UUID, user: VerifiedUser, db: Data
         ]
         raise DomainValidationError(errors) from exc
     return DatasetView(revision=draft.revision, dataset=dataset)
+
+
+@router.post("/draft/entities/{entity_id}/preview", response_model=Preview)
+async def preview_draft_entity(
+    org_id: UUID,
+    agent_id: UUID,
+    entity_id: UUID,
+    body: PreviewInput,
+    request: Request,
+    user: VerifiedUser,
+    db: Database,
+):
+    await organization_context(db, user, org_id, "manage_agents")
+    _, draft = await agent_and_draft(db, org_id, agent_id)
+    if draft.revision != body.revision:
+        raise HTTPException(409, "Черновик изменился. Обновите страницу")
+    try:
+        dataset = parse_dataset(draft.configuration)
+    except ValidationError as exc:
+        raise HTTPException(422, "Проверьте данные агента") from exc
+    entity = next((item for item in dataset.entities if item.id == entity_id), None)
+    if entity is None:
+        raise HTTPException(404, "Сущность не найдена")
+    if entity.method == "learned":
+        raise HTTPException(422, "Для проверки этой сущности требуется обученная версия")
+    try:
+        return await run_preview(entity, body.text, request.app.state.entity_preview_slots)
+    except TimeoutError as exc:
+        raise HTTPException(503, "Проверка заняла слишком много времени") from exc
+    except ValueError as exc:
+        raise HTTPException(422, "Проверьте настройки сущности") from exc
 
 
 @router.post("/draft/validate", response_model=ValidationView)

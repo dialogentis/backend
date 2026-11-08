@@ -234,6 +234,23 @@ async def test_lease_fencing_permissions_and_atomic_draft_save(app):
         dataset = await owner.get(f"{base}/draft/dataset")
         assert dataset.status_code == 200 and dataset.json()["revision"] == 4
         assert dataset.json()["dataset"]["intents"][0]["enabled"] is True
+        entity_id = body["config"]["entities"][0]["id"]
+        preview_path = f"{base}/draft/entities/{entity_id}/preview"
+        preview = await owner.post(preview_path, json={"revision": 4, "text": "📦 123"})
+        assert preview.status_code == 200
+        assert preview.json()["matches"][0]["text"] == "123"
+        assert preview.json()["matches"][0]["start"] == 2
+        assert (
+            await owner.post(preview_path, json={"revision": 3, "text": "123"})
+        ).status_code == 409
+        assert (
+            await editor.post(preview_path, json={"revision": 4, "text": "123"})
+        ).status_code == 403
+        assert (
+            await owner.post(
+                f"{base}/draft/entities/{uuid4()}/preview", json={"revision": 4, "text": "123"}
+            )
+        ).status_code == 404
         unknown_field = deepcopy(body)
         unknown_field["config"]["intents"][0]["PRIVATE_FIELD"] = "PRIVATE_VALUE"
         bad = await owner.put(

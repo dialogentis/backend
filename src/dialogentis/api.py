@@ -50,6 +50,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     app.state.settings = config
     app.state.session_factory = factory
+    app.state.entity_preview_slots = asyncio.Semaphore(4)
     app.add_middleware(BodyLimitMiddleware, max_bytes=config.max_body_bytes)
     app.include_router(auth_router)
     app.include_router(organizations_router)
