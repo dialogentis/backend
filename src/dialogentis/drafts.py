@@ -15,6 +15,7 @@ from dialogentis.auth.security import VerifiedUser, digest
 from dialogentis.contracts import InputModel, revision_etag
 from dialogentis.datasets.routes import issue_view, validate_configuration
 from dialogentis.dependencies import Database
+from dialogentis.flow_schema import Flow
 from dialogentis.models import AgentDraft, User
 from dialogentis.organizations import audit, organization_context
 
@@ -38,45 +39,6 @@ class LeaseView(BaseModel):
     holder_id: UUID
     holder_name: str
     expires_at: datetime
-
-
-class Position(InputModel):
-    x: float = Field(allow_inf_nan=False)
-    y: float = Field(allow_inf_nan=False)
-
-
-class FlowNode(InputModel):
-    id: UUID
-    type: Literal[
-        "start",
-        "switch_intent",
-        "say",
-        "ask_slot",
-        "set_slot",
-        "condition",
-        "http_action",
-        "handoff",
-        "return",
-        "fallback",
-        "end",
-    ]
-    config: dict[str, JsonValue]
-    position: Position
-
-
-class FlowEdge(InputModel):
-    id: UUID
-    source: UUID
-    source_handle: str = Field(min_length=1, max_length=128)
-    target: UUID
-
-
-class Flow(InputModel):
-    schema_version: Literal[1]
-    flow_id: UUID
-    nodes: list[FlowNode] = Field(max_length=300)
-    edges: list[FlowEdge] = Field(max_length=600)
-    layout: dict[str, JsonValue]
 
 
 class DraftConfig(InputModel):
