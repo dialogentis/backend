@@ -8,7 +8,7 @@ dependencies = [
   "sqlalchemy[asyncio]>=2.0.44", "psycopg[binary]>=3.2", "alembic>=1.17",
   "taskiq>=0.12", "taskiq-aio-pika>=0.5", "httpx>=0.28",
   "scikit-learn>=1.7", "python-crfsuite>=0.9.12", "google-re2>=1.1",
-  "argon2-cffi>=25", "cryptography>=46", "email-validator>=2.3",
+  "argon2-cffi>=25", "cryptography>=46", "email-validator>=2.3", "python-multipart>=0.0.33",
 ]
 
 [dependency-groups]

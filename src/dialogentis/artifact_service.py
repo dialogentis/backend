@@ -13,6 +13,7 @@ from dialogentis.artifact_records import Artifact
 from dialogentis.artifacts import ArtifactInfo, ArtifactStorage
 from dialogentis.config import Settings
 from dialogentis.datasets.export_models import ExportTask
+from dialogentis.datasets.import_models import ImportTask
 from dialogentis.jobs.models import Job
 from dialogentis.models import Organization
 
@@ -182,6 +183,14 @@ async def cleanup_expired(db: AsyncSession, storage: ArtifactStorage, organizati
                 ExportTask.organization_id == organization_id, ExportTask.artifact_id == artifact.id
             )
             .values(artifact_id=None)
+        )
+        await db.execute(
+            update(ImportTask)
+            .where(
+                ImportTask.organization_id == organization_id,
+                ImportTask.input_artifact_id == artifact.id,
+            )
+            .values(input_artifact_id=None)
         )
         await _blocking(
             lambda artifact_id=artifact.id: storage.delete(organization_id, artifact_id)

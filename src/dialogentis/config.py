@@ -28,7 +28,7 @@ class Settings(BaseSettings):
     smtp_password: SecretStr | None = None
     smtp_from: str = "Dialogentis <no-reply@localhost>"
     max_training_jobs: int = 1
-    max_body_bytes: int = 10 * 1024 * 1024
+    max_body_bytes: int = 10 * 1024 * 1024 + 64 * 1024
 
     @model_validator(mode="after")
     def validate_environment(self) -> Settings:

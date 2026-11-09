@@ -10,6 +10,7 @@ from taskiq import Context, TaskiqDepends
 
 from dialogentis.config import get_settings
 from dialogentis.datasets.export_worker import prepare_export
+from dialogentis.datasets.import_worker import prepare_import
 from dialogentis.db import session_factory, unit_of_work
 from dialogentis.deletion_worker import prepare_deletion
 from dialogentis.jobs.broker import broker
@@ -42,6 +43,7 @@ class Handler:
 HANDLERS: dict[str, Handler] = {
     "organization.deletion": Handler(prepare_deletion, timeout_seconds=120, retryable=True),
     "dataset.export": Handler(prepare_export, timeout_seconds=120, retryable=True),
+    "dataset.import": Handler(prepare_import, timeout_seconds=120, retryable=True),
 }
 
 

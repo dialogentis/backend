@@ -12,6 +12,7 @@ from dialogentis.artifact_service import ArtifactUnavailable, cleanup_expired, c
 from dialogentis.artifacts import ArtifactStorage
 from dialogentis.config import get_settings
 from dialogentis.datasets.export_worker import scrub_exports
+from dialogentis.datasets.import_worker import scrub_imports
 from dialogentis.db import session_factory, unit_of_work
 from dialogentis.jobs.broker import create_broker
 from dialogentis.jobs.dispatcher import dispatcher_factory
@@ -42,6 +43,7 @@ async def reconcile_once(
                     break
             async with unit_of_work(factory, organization_id=organization_id) as db:
                 await scrub_exports(db, organization_id)
+                await scrub_imports(db, organization_id)
         storage = ArtifactStorage(get_settings().artifact_root)
         filesystem_organizations = await asyncio.to_thread(storage.organizations)
         for organization_id in set(artifact_organizations) | set(filesystem_organizations):
