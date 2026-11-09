@@ -1,0 +1,45 @@
+{
+  "fixture_sha256": "4a8b50fc903a3d06733740e26b61cad175c22eb8b39bb756774ccdbe5f5b7ab7",
+  "uv_lock_sha256": "554b6d7234cd4e6badc9e86fa315513a1eb634f4e5f3c9770a03f10e5056a9af",
+  "python": "3.14.6",
+  "platform": "macOS-26.5.2-arm64-arm-64bit-Mach-O",
+  "libraries": {
+    "scikit-learn": "1.9.1",
+    "python-crfsuite": "0.9.12",
+    "numpy": "2.5.4",
+    "scipy": "1.18.1"
+  },
+  "thresholds": {
+    "score": 0.55,
+    "margin": 0.15,
+    "similarity": 0.2
+  },
+  "results": {
+    "order_support": {
+      "name": "Поддержка интернет-магазина",
+      "intents": 5,
+      "train": 50,
+      "test": 25,
+      "unknown": 20,
+      "intent_macro_f1": 0.0,
+      "entity_f1": 1.0,
+      "entity_expected_spans": 3,
+      "unknown_rejection": 1.0,
+      "known_fallback_rate": 1.0,
+      "warnings": []
+    },
+    "education": {
+      "name": "Образовательный центр",
+      "intents": 5,
+      "train": 50,
+      "test": 25,
+      "unknown": 20,
+      "intent_macro_f1": 0.15,
+      "entity_f1": 1.0,
+      "entity_expected_spans": 7,
+      "unknown_rejection": 1.0,
+      "known_fallback_rate": 0.88,
+      "warnings": []
+    }
+  }
+}

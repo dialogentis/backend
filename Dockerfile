@@ -19,6 +19,7 @@ CMD ["uv", "run", "--locked", "--no-dev", "--no-sync", "uvicorn", "dialogentis.m
 FROM base AS test
 RUN --mount=type=cache,target=/root/.cache/uv uv sync --locked --python /usr/local/bin/python
 COPY tests ./tests
+COPY benchmarks ./benchmarks
 COPY scripts ./scripts
 RUN chown app:app /app && chown -R app:app /app/tests /app/scripts
 USER app
