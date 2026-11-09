@@ -14,6 +14,7 @@ from dialogentis.datasets.schema import Dataset
 from dialogentis.nlu.adapter import NLUAdapter
 from dialogentis.nlu.intent import Thresholds
 from dialogentis.nlu.model_store import ModelIdentity, pack_model
+from dialogentis.nlu.settings import QualitySettings
 
 MAX_REQUEST_BYTES = 12 * 1024 * 1024
 MAX_REPORT_BYTES = 32 * 1024 * 1024
@@ -50,6 +51,7 @@ def main() -> None:
         {key: config[key] for key in ("intents", "entities", "examples")}
     )
     thresholds = Thresholds(**snapshot["nlu_settings"])
+    quality = QualitySettings.model_validate(config.get("quality_settings", {}))
     identity = ModelIdentity(
         *(
             UUID(request[key])
@@ -65,11 +67,11 @@ def main() -> None:
     warnings = []
     if report.intents.macro_f1 is None:
         warnings.append("intent_quality_unavailable")
-    elif report.intents.macro_f1 < 0.8:
+    elif report.intents.macro_f1 < quality.intent_f1:
         warnings.append("low_intent_quality")
     if report.entities.f1 is None:
         warnings.append("entity_quality_unavailable")
-    elif report.entities.f1 < 0.8:
+    elif report.entities.f1 < quality.entity_f1:
         warnings.append("low_entity_quality")
     if report.intents.unknown_rejection is None:
         warnings.append("unknown_quality_unavailable")

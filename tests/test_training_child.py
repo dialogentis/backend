@@ -50,6 +50,27 @@ async def test_real_child_trains_evaluates_and_packages_a_signed_model():
     assert report["intents"]["test_count"] == 2
 
 
+async def test_quality_thresholds_only_change_warnings():
+    request, _, snapshot, settings = request_data()
+    snapshot["config"]["quality_settings"] = {"intent_f1": 0.0, "entity_f1": 0.0}
+
+    async def progress(stage):
+        pass
+
+    _, baseline = await run_child(request, settings, progress)
+    snapshot["config"]["quality_settings"] = {"intent_f1": 1.0, "entity_f1": 1.0}
+    _, strict = await run_child(request, settings, progress)
+    assert baseline["intents"] == strict["intents"]
+    assert baseline["entities"] == strict["entities"]
+    assert "low_intent_quality" not in baseline["warnings"]
+    assert "low_entity_quality" not in baseline["warnings"]
+    for metric, warning in (
+        (strict["intents"]["macro_f1"], "low_intent_quality"),
+        (strict["entities"]["f1"], "low_entity_quality"),
+    ):
+        assert (warning in strict["warnings"]) == (metric is not None and metric < 1.0)
+
+
 async def test_cancelling_training_stops_child_process(monkeypatch):
     request, _, _, settings = request_data()
     original = asyncio.create_subprocess_exec

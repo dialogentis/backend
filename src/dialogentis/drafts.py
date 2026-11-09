@@ -17,7 +17,7 @@ from dialogentis.datasets.routes import issue_view, validate_configuration
 from dialogentis.dependencies import Database
 from dialogentis.flow_schema import Flow
 from dialogentis.models import AgentDraft, User
-from dialogentis.nlu.settings import NLUSettings
+from dialogentis.nlu.settings import NLUSettings, QualitySettings
 from dialogentis.organizations import audit, organization_context
 
 router = APIRouter(prefix="/api/v1/organizations/{org_id}/agents/{agent_id}", tags=["drafts"])
@@ -49,6 +49,7 @@ class DraftConfig(InputModel):
     slots: list[dict[str, JsonValue]]
     flow: Flow
     nlu_settings: NLUSettings = Field(default_factory=NLUSettings)
+    quality_settings: QualitySettings = Field(default_factory=QualitySettings)
 
 
 class DraftInput(InputModel):

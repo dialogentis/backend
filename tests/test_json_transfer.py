@@ -56,10 +56,13 @@ def test_json_round_trip_preserves_text_offsets_and_graph():
 def test_nlu_settings_survive_export_and_merge_preserves_current_settings():
     current = populated()
     current.nlu_settings.score = 0.72
+    current.quality_settings.intent_f1 = 0.9
     parsed, errors = parse_json(export_json(current))
     assert not errors and parsed is not None and parsed.nlu_settings.score == 0.72
+    assert parsed.quality_settings.intent_f1 == 0.9
     legacy = current.model_dump(mode="json")
     del legacy["nlu_settings"]
+    del legacy["quality_settings"]
     imported, errors = parse_json(encode(legacy))
     assert not errors and imported is not None and imported.nlu_settings.score == 0.55
     imported.intents.clear()
@@ -67,6 +70,7 @@ def test_nlu_settings_survive_export_and_merge_preserves_current_settings():
     imported.examples.clear()
     preview = preview_json(imported, current, "merge")
     assert preview.config is not None and preview.config.nlu_settings.score == 0.72
+    assert preview.config.quality_settings.intent_f1 == 0.9
     assert any(item.code == "settings_not_imported" for item in preview.warnings)
     invalid = current.model_dump(mode="json")
     for value in (-0.01, 1.01, True, "0.5", None):

@@ -9720,6 +9720,9 @@
           },
           "nlu_settings": {
             "$ref": "#/components/schemas/NLUSettings"
+          },
+          "quality_settings": {
+            "$ref": "#/components/schemas/QualitySettings"
           }
         },
         "additionalProperties": false,
@@ -11508,6 +11511,27 @@
         ],
         "title": "PreviewInput"
       },
+      "QualitySettings": {
+        "properties": {
+          "intent_f1": {
+            "type": "number",
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Intent F1",
+            "default": 0.8
+          },
+          "entity_f1": {
+            "type": "number",
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Entity F1",
+            "default": 0.8
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "QualitySettings"
+      },
       "ReportView": {
         "properties": {
           "version_id": {
@@ -11521,6 +11545,9 @@
           },
           "nlu_settings": {
             "$ref": "#/components/schemas/NLUSettings"
+          },
+          "quality_settings": {
+            "$ref": "#/components/schemas/QualitySettings"
           },
           "intents": {
             "$ref": "#/components/schemas/IntentSummary"
@@ -11560,6 +11587,7 @@
           "version_id",
           "training_examples",
           "nlu_settings",
+          "quality_settings",
           "intents",
           "entities",
           "intent_catalog",
