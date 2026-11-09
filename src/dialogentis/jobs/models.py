@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Literal
 from uuid import UUID, uuid4
 
 from sqlalchemy import (
@@ -10,6 +11,7 @@ from sqlalchemy import (
     String,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -23,6 +25,9 @@ class Job(Base):
     # Job metadata must survive removal of the organization it belongs to.
     organization_id: Mapped[UUID] = mapped_column(index=True)
     kind: Mapped[str] = mapped_column(String(80))
+    queue: Mapped[Literal["normal", "training"]] = mapped_column(
+        String(16), default="normal", server_default=text("'normal'")
+    )
     status: Mapped[str] = mapped_column(String(16), default="queued")
     attempts: Mapped[int] = mapped_column(default=0)
     delivery_recoveries: Mapped[int] = mapped_column(default=0)
@@ -37,6 +42,12 @@ class Job(Base):
 
     __table_args__ = (
         UniqueConstraint("organization_id", "id"),
+        UniqueConstraint("organization_id", "id", "queue", name="uq_jobs_org_id_queue"),
+        CheckConstraint(
+            "(kind = 'agent.training' AND queue = 'training') OR "
+            "(kind <> 'agent.training' AND queue = 'normal')",
+            name="ck_jobs_kind_queue",
+        ),
         CheckConstraint("status IN ('queued','running','succeeded','failed','cancelled')"),
         CheckConstraint("attempts >= 0"),
         CheckConstraint("delivery_recoveries >= 0"),
@@ -49,6 +60,9 @@ class OutboxEvent(Base):
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
     organization_id: Mapped[UUID] = mapped_column()
     job_id: Mapped[UUID] = mapped_column()
+    queue: Mapped[Literal["normal", "training"]] = mapped_column(
+        String(16), default="normal", server_default=text("'normal'")
+    )
     available_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
@@ -56,6 +70,11 @@ class OutboxEvent(Base):
 
     __table_args__ = (
         ForeignKeyConstraint(["organization_id", "job_id"], ["jobs.organization_id", "jobs.id"]),
+        ForeignKeyConstraint(
+            ["organization_id", "job_id", "queue"],
+            ["jobs.organization_id", "jobs.id", "jobs.queue"],
+            name="fk_outbox_job_queue",
+        ),
         Index("ix_job_outbox_pending", "available_at", postgresql_where=published_at.is_(None)),
         Index("ix_job_outbox_job_status", "organization_id", "job_id", "published_at"),
     )

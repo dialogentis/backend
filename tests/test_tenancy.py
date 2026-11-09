@@ -45,7 +45,7 @@ def test_job_recovery_upgrade_preserves_existing_job():
     url = Settings().database_url
     assert url is not None
     engine = create_engine(url.get_secret_value().replace("postgresql://", "postgresql+psycopg://"))
-    tenant, job_id, event_id = uuid4(), uuid4(), uuid4()
+    tenant, job_id, event_id, training_id, training_event_id = (uuid4() for _ in range(5))
     try:
         command.downgrade(config, "0004")
         with engine.begin() as connection:
@@ -68,6 +68,21 @@ def test_job_recovery_upgrade_preserves_existing_job():
                 ),
                 {"id": event_id, "tenant": tenant, "job": job_id},
             )
+            connection.execute(
+                text(
+                    "INSERT INTO jobs (id, organization_id, kind, status, attempts, "
+                    "cancel_requested) "
+                    "VALUES (:id, :tenant, 'agent.training', 'queued', 0, false)"
+                ),
+                {"id": training_id, "tenant": tenant},
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO job_outbox (id, organization_id, job_id) "
+                    "VALUES (:id, :tenant, :job)"
+                ),
+                {"id": training_event_id, "tenant": tenant, "job": training_id},
+            )
         command.upgrade(config, "head")
         with engine.begin() as connection:
             connection.execute(
@@ -88,6 +103,13 @@ def test_job_recovery_upgrade_preserves_existing_job():
                 )
                 == job_id
             )
+            assert connection.execute(
+                text(
+                    "SELECT j.queue, o.queue FROM jobs j JOIN job_outbox o ON o.job_id = j.id "
+                    "WHERE j.id = :id"
+                ),
+                {"id": training_id},
+            ).one() == ("training", "training")
     finally:
         engine.dispose()
 

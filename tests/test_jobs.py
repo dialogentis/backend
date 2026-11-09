@@ -111,10 +111,14 @@ async def test_dispatcher_is_restricted_and_recovers_after_publish_failure(tmp_p
         with pytest.raises(DBAPIError):
             async with dispatch_factory() as db:
                 await db.execute(text("UPDATE job_outbox SET organization_id = gen_random_uuid()"))
+        with pytest.raises(DBAPIError):
+            async with dispatch_factory() as db:
+                await db.execute(text("UPDATE job_outbox SET queue = 'training'"))
 
         uncertain = []
 
-        async def fail_publish(job_id, org_id):
+        async def fail_publish(job_id, org_id, queue):
+            assert queue == "normal"
             uncertain.append((job_id, org_id))
             raise ConnectionError("publication confirmation lost")
 
@@ -146,7 +150,8 @@ async def test_dispatcher_is_restricted_and_recovers_after_publish_failure(tmp_p
                 await broker.startup()
                 assert broker.write_channel is not None and broker.write_channel.publisher_confirms
 
-                async def publish(job_id, org_id):
+                async def publish(job_id, org_id, queue):
+                    assert queue == "normal"
                     assert (job_id, org_id) == uncertain[0]
                     await job_probe.kiq(job_id, org_id)
 
@@ -478,6 +483,88 @@ async def test_dispatcher_process_delivers_job_to_worker(tmp_path: Path):
                 if process.returncode is None:
                     process.terminate()
                 await asyncio.wait_for(process.wait(), timeout=10)
+            await factory.kw["bind"].dispose()
+
+
+async def test_training_and_normal_jobs_use_separate_real_workers(tmp_path: Path):
+    url = Settings().database_url
+    assert url is not None
+    factory = session_factory(url.get_secret_value())
+    org_id = uuid4()
+    async with unit_of_work(factory, organization_id=org_id) as db:
+        normal_id = enqueue(db, org_id, "unsupported").id
+        training_id = enqueue(db, org_id, "agent.training").id
+    log_path = tmp_path / "queues.log"
+    with log_path.open("w") as log:
+        common = [sys.executable, "-m", "taskiq", "worker"]
+        flags = ["--workers", "1", "--ack-type", "manual", "--max-async-tasks", "1"]
+        normal = await asyncio.create_subprocess_exec(
+            *common,
+            "dialogentis.jobs.tasks:broker",
+            *flags,
+            env=os.environ.copy(),
+            stdout=log,
+            stderr=log,
+        )
+        dispatcher = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-m",
+            "dialogentis.jobs.dispatcher",
+            env=os.environ.copy(),
+            stdout=log,
+            stderr=log,
+        )
+        training = None
+        try:
+            for _ in range(150):
+                async with unit_of_work(factory, organization_id=org_id) as db:
+                    regular = await db.get(Job, normal_id)
+                    pending = await db.get(Job, training_id)
+                    event = await db.scalar(
+                        select(OutboxEvent).where(OutboxEvent.job_id == training_id)
+                    )
+                    if (
+                        regular
+                        and regular.status == "failed"
+                        and pending
+                        and event
+                        and event.published_at
+                    ):
+                        assert pending.status == "queued" and pending.attempts == 0
+                        break
+                assert normal.returncode is None and dispatcher.returncode is None, (
+                    log_path.read_text()
+                )
+                await asyncio.sleep(0.1)
+            else:
+                pytest.fail("Dispatcher did not publish both jobs")
+            training = await asyncio.create_subprocess_exec(
+                *common,
+                "dialogentis.jobs.training_tasks:broker",
+                *flags,
+                env=os.environ.copy(),
+                stdout=log,
+                stderr=log,
+            )
+            for _ in range(150):
+                async with unit_of_work(factory, organization_id=org_id) as db:
+                    job = await db.get(Job, training_id)
+                    if job and job.status == "failed":
+                        assert job.error_code == "unsupported_job_kind" and job.attempts == 1
+                        break
+                assert training.returncode is None, log_path.read_text()
+                await asyncio.sleep(0.1)
+            else:
+                pytest.fail("Training worker did not consume its queue")
+        finally:
+            for process in (dispatcher, normal, training):
+                if process is not None:
+                    if process.returncode is None:
+                        process.terminate()
+                    await asyncio.wait_for(process.wait(), timeout=10)
+            async with unit_of_work(factory, organization_id=org_id) as db:
+                await db.execute(delete(OutboxEvent))
+                await db.execute(delete(Job))
             await factory.kw["bind"].dispose()
 
 

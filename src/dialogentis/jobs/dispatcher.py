@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from dialogentis.jobs.models import OutboxEvent
 
-Publisher = Callable[[UUID, UUID], Awaitable[None]]
+Publisher = Callable[[UUID, UUID, str], Awaitable[None]]
 
 
 def dispatcher_factory(password_file: Path) -> async_sessionmaker[AsyncSession]:
@@ -40,22 +40,35 @@ async def dispatch_once(factory: async_sessionmaker[AsyncSession], publish: Publ
             )
         ).all()
         for event in events:
-            await publish(event.job_id, event.organization_id)
+            await publish(event.job_id, event.organization_id, event.queue)
             event.published_at = datetime.now(UTC)
         return len(events)
 
 
 async def main() -> None:
     from dialogentis.jobs.tasks import broker, run_job
+    from dialogentis.jobs.training_tasks import broker as training_broker
+    from dialogentis.jobs.training_tasks import run_training_job
 
     factory = dispatcher_factory(Path("/run/dialogentis-dispatcher/password"))
     try:
         await broker.startup()
+        await training_broker.startup()
         if broker.write_channel is None or not broker.write_channel.publisher_confirms:
             raise RuntimeError("RabbitMQ publisher confirms are required")
+        if (
+            training_broker.write_channel is None
+            or not training_broker.write_channel.publisher_confirms
+        ):
+            raise RuntimeError("RabbitMQ publisher confirms are required")
 
-        async def publish(job_id: UUID, organization_id: UUID) -> None:
-            await run_job.kiq(job_id, organization_id)
+        async def publish(job_id: UUID, organization_id: UUID, queue: str) -> None:
+            if queue == "normal":
+                await run_job.kiq(job_id, organization_id)
+            elif queue == "training":
+                await run_training_job.kiq(job_id, organization_id)
+            else:
+                raise ValueError("Unknown job queue")
 
         while True:
             try:
@@ -64,6 +77,7 @@ async def main() -> None:
                 logging.warning("Unable to dispatch jobs; retrying")
             await asyncio.sleep(1)
     finally:
+        await training_broker.shutdown()
         await broker.shutdown()
         await factory.kw["bind"].dispose()
 

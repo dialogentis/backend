@@ -1,6 +1,7 @@
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
+from typing import Literal
 from uuid import UUID
 
 from sqlalchemy import select
@@ -13,7 +14,7 @@ from dialogentis.datasets.export_worker import prepare_export
 from dialogentis.datasets.import_worker import prepare_import
 from dialogentis.db import session_factory, unit_of_work
 from dialogentis.deletion_worker import prepare_deletion
-from dialogentis.jobs.broker import broker
+from dialogentis.jobs.broker import JobBroker, broker
 from dialogentis.jobs.lifecycle import (
     Apply,
     Claim,
@@ -88,9 +89,10 @@ async def process_job(
     job_id: UUID,
     organization_id: UUID,
     handlers: Mapping[str, Handler] | None = None,
+    queue: Literal["normal", "training"] = "normal",
 ) -> None:
     handlers = HANDLERS if handlers is None else handlers
-    current = await claim(factory, job_id, organization_id, frozenset(handlers))
+    current = await claim(factory, job_id, organization_id, frozenset(handlers), queue)
     if current is None:
         return
     if current.kind != "organization.deletion":
@@ -153,18 +155,29 @@ async def process_job(
 
 @broker.task(ack_type="manual")
 async def run_job(job_id: UUID, organization_id: UUID, context: Context = TaskiqDepends()) -> None:
+    await _run(broker, job_id, organization_id, context, HANDLERS, "normal")
+
+
+async def _run(
+    job_broker: JobBroker,
+    job_id: UUID,
+    organization_id: UUID,
+    context: Context,
+    handlers: Mapping[str, Handler],
+    queue: Literal["normal", "training"],
+) -> None:
     try:
         url = get_settings().database_url
         if url is None:
             raise ValueError("DATABASE_URL is required")
         factory = session_factory(url.get_secret_value())
         try:
-            await process_job(factory, job_id, organization_id)
+            await process_job(factory, job_id, organization_id, handlers, queue)
         finally:
             await factory.kw["bind"].dispose()
         await context.ack()
     except Exception:
         # Closing the consumer channel requeues the unacknowledged message.
-        if broker.read_channel is not None:
-            await broker.read_channel.close()
+        if job_broker.read_channel is not None:
+            await job_broker.read_channel.close()
         raise

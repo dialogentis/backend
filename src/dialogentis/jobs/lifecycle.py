@@ -2,6 +2,7 @@ import random
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from typing import Literal
 from uuid import UUID, uuid4
 
 from sqlalchemy import and_, exists, func, or_, select, update
@@ -57,7 +58,10 @@ def schedule_retry(db: AsyncSession, job: Job, now: datetime, delay: timedelta) 
     job.next_retry_at = now + delay
     db.add(
         OutboxEvent(
-            organization_id=job.organization_id, job_id=job.id, available_at=job.next_retry_at
+            organization_id=job.organization_id,
+            job_id=job.id,
+            queue=job.queue,
+            available_at=job.next_retry_at,
         )
     )
 
@@ -67,10 +71,11 @@ async def claim(
     job_id: UUID,
     organization_id: UUID,
     supported_kinds: frozenset[str],
+    queue: Literal["normal", "training"] = "normal",
 ) -> Claim | None:
     async with unit_of_work(factory, organization_id=organization_id) as db:
         job = await db.scalar(select(Job).where(Job.id == job_id).with_for_update())
-        if job is None or job.status != "queued":
+        if job is None or job.status != "queued" or job.queue != queue:
             return None
         now = await database_now(db)
         if job.cancel_requested:

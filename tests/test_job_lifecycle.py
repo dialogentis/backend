@@ -5,6 +5,7 @@ from uuid import uuid4
 
 import pytest
 from sqlalchemy import delete, select
+from sqlalchemy.exc import IntegrityError
 
 from dialogentis.artifact_records import Artifact
 from dialogentis.artifact_service import reserve_artifact, write_artifact
@@ -48,6 +49,35 @@ async def factory():
             await db.execute(delete(Job))
             await db.execute(delete(Organization).where(Organization.id == organization_id))
     await value.kw["bind"].dispose()
+
+
+async def test_training_jobs_and_outbox_are_bound_to_the_training_queue(factory):
+    factory, tenants = factory
+    org_id = uuid4()
+    tenants.append(org_id)
+    async with unit_of_work(factory, organization_id=org_id) as db:
+        db.add(Organization(id=org_id, name="Training", slug=f"org-{uuid4()}"))
+        training = enqueue(db, org_id, "agent.training")
+        regular = enqueue(db, org_id, "dataset.import")
+        training_id, regular_id = training.id, regular.id
+    async with unit_of_work(factory, organization_id=org_id) as db:
+        events = {item.job_id: item.queue for item in (await db.scalars(select(OutboxEvent))).all()}
+        assert events == {training_id: "training", regular_id: "normal"}
+    with pytest.raises(IntegrityError):
+        async with unit_of_work(factory, organization_id=org_id) as db:
+            db.add(OutboxEvent(organization_id=org_id, job_id=training_id, queue="normal"))
+    assert await claim(factory, training_id, org_id, frozenset({"agent.training"})) is None
+    async with unit_of_work(factory, organization_id=org_id) as db:
+        job = await db.get(Job, training_id)
+        assert job is not None and job.status == "queued" and job.attempts == 0
+    current = await claim(factory, training_id, org_id, frozenset({"agent.training"}), "training")
+    assert current is not None
+    assert await fail(factory, current, error_code="test", retryable=True)
+    async with unit_of_work(factory, organization_id=org_id) as db:
+        events = (
+            await db.scalars(select(OutboxEvent).where(OutboxEvent.job_id == training_id))
+        ).all()
+        assert len(events) == 2 and all(event.queue == "training" for event in events)
 
 
 async def test_retry_fences_old_attempt_and_cancel_prevents_apply(factory):

@@ -159,6 +159,16 @@ services:
       rabbitmq: {condition: service_healthy}
     volumes: [artifacts:/app/artifacts, deletion-journal:/app/deletion-journal]
     restart: unless-stopped
+  training-worker:
+    <<: *app
+    command: [uv, run, --locked, --no-dev, --no-sync, taskiq, worker, 'dialogentis.jobs.training_tasks:broker', --workers, '1', --ack-type, manual, --max-async-tasks, '1']
+    cpus: 2.0
+    mem_limit: 4g
+    depends_on:
+      deletion-replay: {condition: service_completed_successfully}
+      rabbitmq: {condition: service_healthy}
+    volumes: [artifacts:/app/artifacts]
+    restart: unless-stopped
   maintenance-worker:
     <<: *app
     command: [uv, run, --locked, --no-dev, --no-sync, taskiq, worker, 'dialogentis.jobs.maintenance:broker', --workers, '1', --ack-type, manual, --max-async-tasks, '1']
