@@ -19,6 +19,7 @@ from dialogentis.jobs.enqueue import enqueue
 from dialogentis.jobs.lifecycle import finish
 from dialogentis.jobs.models import Job
 from dialogentis.organizations import audit, organization_context
+from dialogentis.versions.models import AgentVersion
 
 router = APIRouter(prefix="/api/v1/organizations/{org_id}", tags=["exports"])
 JobStatus = Literal["queued", "running", "succeeded", "failed", "cancelled"]
@@ -55,6 +56,19 @@ class ImportJob(BaseModel):
     preview_id: UUID
     base_revision: int
     format: Literal["json", "csv"]
+
+
+class TrainingJob(BaseModel):
+    job_id: UUID
+    status: JobStatus
+    cancel_requested: bool
+    error_code: str | None
+    version_id: UUID
+    source_revision: int
+    stage: (
+        Literal["validation", "intent_training", "entity_training", "evaluation", "packaging"]
+        | None
+    )
 
 
 @router.post("/agents/{agent_id}/exports", status_code=202, response_model=ExportCreated)
@@ -123,17 +137,38 @@ async def dataset_job(db: Database, org_id: UUID, job_id: UUID, *, lock: bool = 
     if lock:
         query = query.with_for_update()
     job = await db.scalar(query)
-    if job is None or job.kind not in {"dataset.export", "dataset.import"}:
+    if job is None or job.kind not in {"dataset.export", "dataset.import", "agent.training"}:
         raise HTTPException(404, "Задание не найдено")
-    task = await db.get(ExportTask if job.kind == "dataset.export" else ImportTask, job_id)
+    if job.kind == "agent.training":
+        task = await db.scalar(select(AgentVersion).where(AgentVersion.job_id == job_id))
+    else:
+        task = await db.get(ExportTask if job.kind == "dataset.export" else ImportTask, job_id)
     if task is None or task.organization_id != org_id:
         raise HTTPException(404, "Задание не найдено")
     return job, task
 
 
-def dataset_job_view(job: Job, task: ExportTask | ImportTask) -> ExportJob | ImportJob:
+def dataset_job_view(
+    job: Job, task: ExportTask | ImportTask | AgentVersion
+) -> ExportJob | ImportJob | TrainingJob:
     if isinstance(task, ExportTask):
         return job_view(job, task)
+    if isinstance(task, AgentVersion):
+        return TrainingJob(
+            job_id=job.id,
+            status=cast(JobStatus, job.status),
+            cancel_requested=job.cancel_requested,
+            error_code=job.error_code,
+            version_id=task.id,
+            source_revision=task.source_revision,
+            stage=cast(
+                Literal[
+                    "validation", "intent_training", "entity_training", "evaluation", "packaging"
+                ]
+                | None,
+                job.stage,
+            ),
+        )
     return ImportJob(
         job_id=job.id,
         status=cast(JobStatus, job.status),
@@ -145,19 +180,20 @@ def dataset_job_view(job: Job, task: ExportTask | ImportTask) -> ExportJob | Imp
     )
 
 
-@router.get("/jobs/{job_id}", response_model=ExportJob | ImportJob)
+@router.get("/jobs/{job_id}", response_model=ExportJob | ImportJob | TrainingJob)
 async def get_export_job(org_id: UUID, job_id: UUID, user: VerifiedUser, db: Database):
     await organization_context(db, user, org_id, "manage_agents")
     job, task = await dataset_job(db, org_id, job_id)
     return dataset_job_view(job, task)
 
 
-@router.post("/jobs/{job_id}/cancel", response_model=ExportJob | ImportJob)
+@router.post("/jobs/{job_id}/cancel", response_model=ExportJob | ImportJob | TrainingJob)
 async def cancel_export_job(org_id: UUID, job_id: UUID, user: VerifiedUser, db: Database):
     await organization_context(db, user, org_id, "manage_agents")
     job, task = await dataset_job(db, org_id, job_id, lock=True)
     member = await organization_context(db, user, org_id, "manage_agents", lock=True)
-    if task.requested_by != user.id and member.role not in {"owner", "admin"}:
+    requested_by = task.created_by if isinstance(task, AgentVersion) else task.requested_by
+    if requested_by != user.id and member.role not in {"owner", "admin"}:
         raise HTTPException(403, "Отмена доступна автору задания или администратору")
     if job.status not in {"queued", "running"}:
         raise HTTPException(409, "Задание уже завершено")
@@ -172,7 +208,7 @@ async def cancel_export_job(org_id: UUID, job_id: UUID, user: VerifiedUser, db: 
         finish(job, "cancelled", now)
         if isinstance(task, ExportTask):
             task.snapshot = None
-        else:
+        elif isinstance(task, ImportTask):
             task.candidate, task.report = None, None
     return dataset_job_view(job, task)
 

@@ -20,6 +20,7 @@ from dialogentis.db import session_factory, unit_of_work
 from dialogentis.jobs.dispatcher import dispatch_once, dispatcher_factory
 from dialogentis.jobs.enqueue import enqueue
 from dialogentis.jobs.models import Job, OutboxEvent
+from dialogentis.models import Organization
 
 pytestmark = [
     pytest.mark.integration,
@@ -492,6 +493,7 @@ async def test_training_and_normal_jobs_use_separate_real_workers(tmp_path: Path
     factory = session_factory(url.get_secret_value())
     org_id = uuid4()
     async with unit_of_work(factory, organization_id=org_id) as db:
+        db.add(Organization(id=org_id, name="Test", slug=f"org-{uuid4()}"))
         normal_id = enqueue(db, org_id, "unsupported").id
         training_id = enqueue(db, org_id, "agent.training").id
     log_path = tmp_path / "queues.log"
@@ -550,7 +552,7 @@ async def test_training_and_normal_jobs_use_separate_real_workers(tmp_path: Path
                 async with unit_of_work(factory, organization_id=org_id) as db:
                     job = await db.get(Job, training_id)
                     if job and job.status == "failed":
-                        assert job.error_code == "unsupported_job_kind" and job.attempts == 1
+                        assert job.error_code == "training_version_missing" and job.attempts == 1
                         break
                 assert training.returncode is None, log_path.read_text()
                 await asyncio.sleep(0.1)
@@ -565,6 +567,7 @@ async def test_training_and_normal_jobs_use_separate_real_workers(tmp_path: Path
             async with unit_of_work(factory, organization_id=org_id) as db:
                 await db.execute(delete(OutboxEvent))
                 await db.execute(delete(Job))
+                await db.execute(delete(Organization).where(Organization.id == org_id))
             await factory.kw["bind"].dispose()
 
 

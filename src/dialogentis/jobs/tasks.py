@@ -172,7 +172,14 @@ async def _run(
             raise ValueError("DATABASE_URL is required")
         factory = session_factory(url.get_secret_value())
         try:
-            await process_job(factory, job_id, organization_id, handlers, queue)
+            if queue == "training":
+                from dialogentis.training.serial import run_serialized
+
+                await run_serialized(
+                    factory, lambda: process_job(factory, job_id, organization_id, handlers, queue)
+                )
+            else:
+                await process_job(factory, job_id, organization_id, handlers, queue)
         finally:
             await factory.kw["bind"].dispose()
         await context.ack()

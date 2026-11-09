@@ -1,5 +1,6 @@
 """Runtime-facing NLU interface; persistence and trusted loading are separate."""
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from uuid import UUID
 
@@ -34,14 +35,26 @@ class NLUAdapter:
     entity_model: LearnedEntityModel | None
 
     @classmethod
-    def train(cls, version_id: UUID, dataset: Dataset, thresholds: Thresholds) -> NLUAdapter:
+    def train(
+        cls,
+        version_id: UUID,
+        dataset: Dataset,
+        thresholds: Thresholds,
+        on_stage: Callable[[str], None] | None = None,
+    ) -> NLUAdapter:
         snapshot = dataset.model_copy(deep=True)
+        if on_stage:
+            on_stage("intent_training")
+        intent_model = train_intents(snapshot)
+        if on_stage and any(item.method == "learned" for item in snapshot.entities):
+            on_stage("entity_training")
+        entity_model = train_learned_entities(snapshot)
         return cls(
             version_id=version_id,
             thresholds=thresholds,
             entities=snapshot.entities,
-            intent_model=train_intents(snapshot),
-            entity_model=train_learned_entities(snapshot),
+            intent_model=intent_model,
+            entity_model=entity_model,
         )
 
     def predict(self, text: str) -> NLUResult:

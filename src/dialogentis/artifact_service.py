@@ -65,8 +65,14 @@ async def reserve_artifact(
     settings: Settings,
     job_id: UUID | None = None,
     ttl_seconds: int = 3600,
+    artifact_id: UUID | None = None,
 ) -> Artifact:
-    if kind not in {"temporary", "model"} or type(max_bytes) is not int or max_bytes < 0:
+    if (
+        kind not in {"temporary", "model"}
+        or type(max_bytes) is not int
+        or max_bytes < 0
+        or (artifact_id is not None and not isinstance(artifact_id, UUID))
+    ):
         raise ValueError("Invalid artifact reservation")
     if type(ttl_seconds) is not int or not 1 <= ttl_seconds <= 3600:
         raise ValueError("Invalid artifact TTL")
@@ -93,7 +99,7 @@ async def reserve_artifact(
         raise ArtifactQuotaExceeded("Artifact quota exceeded")
     now = await _now(db)
     artifact = Artifact(
-        id=uuid4(),
+        id=artifact_id or uuid4(),
         organization_id=organization_id,
         job_id=job_id,
         kind=kind,

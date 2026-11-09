@@ -14,7 +14,7 @@ from dialogentis.jobs.models import Job, OutboxEvent
 MAX_ATTEMPTS = 4
 MAX_DELIVERY_RECOVERIES = 3
 DELIVERY_TIMEOUT = timedelta(minutes=5)
-HEARTBEAT_TIMEOUT = timedelta(minutes=2)
+HEARTBEAT_TIMEOUT = timedelta(seconds=90)
 Apply = Callable[[AsyncSession, Job], Awaitable[None]]
 
 

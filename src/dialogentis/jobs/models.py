@@ -33,6 +33,7 @@ class Job(Base):
     delivery_recoveries: Mapped[int] = mapped_column(default=0)
     cancel_requested: Mapped[bool] = mapped_column(Boolean, default=False)
     error_code: Mapped[str | None] = mapped_column(String(80))
+    stage: Mapped[str | None] = mapped_column(String(32))
     execution_token: Mapped[UUID | None] = mapped_column()
     next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
@@ -51,6 +52,11 @@ class Job(Base):
         CheckConstraint("status IN ('queued','running','succeeded','failed','cancelled')"),
         CheckConstraint("attempts >= 0"),
         CheckConstraint("delivery_recoveries >= 0"),
+        CheckConstraint(
+            "stage IS NULL OR stage IN ('validation','intent_training','entity_training',"
+            "'evaluation','packaging')",
+            name="ck_jobs_stage",
+        ),
     )
 
 
