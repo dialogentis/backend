@@ -124,10 +124,17 @@ async def write_artifact(
     organization_id: UUID,
     artifact_id: UUID,
     chunks: Iterable[bytes],
+    *,
+    expected_kind: Literal["temporary", "model"] | None = None,
 ) -> Artifact:
     artifact = await _locked_artifact(db, organization_id, artifact_id)
     now = await _now(db)
-    if artifact.status != "reserved" or artifact.expires_at is None or artifact.expires_at <= now:
+    if (
+        (expected_kind is not None and artifact.kind != expected_kind)
+        or artifact.status != "reserved"
+        or artifact.expires_at is None
+        or artifact.expires_at <= now
+    ):
         raise ArtifactUnavailable("Artifact reservation unavailable")
     max_bytes = artifact.size_bytes
 
@@ -150,11 +157,14 @@ async def read_artifact(
     artifact_id: UUID,
     *,
     max_bytes: int,
+    expected_kind: Literal["temporary", "model"] | None = None,
 ) -> bytes:
     artifact = await _locked_artifact(db, organization_id, artifact_id)
     now = await _now(db)
-    if artifact.status != "ready" or (
-        artifact.expires_at is not None and artifact.expires_at <= now
+    if (
+        (expected_kind is not None and artifact.kind != expected_kind)
+        or artifact.status != "ready"
+        or (artifact.expires_at is not None and artifact.expires_at <= now)
     ):
         raise ArtifactUnavailable("Artifact unavailable")
     assert artifact.sha256 is not None
