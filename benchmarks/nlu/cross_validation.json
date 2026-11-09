@@ -1,0 +1,95 @@
+{
+  "method": "5-fold stratified known + leave-one-intent-out unknown proxy; training split only",
+  "seed": 42,
+  "thresholds": {
+    "score": 0.55,
+    "margin": 0.15,
+    "similarity": 0.2
+  },
+  "results": {
+    "order_support": {
+      "1.0": {
+        "known_total": 50,
+        "known_correct": 0,
+        "known_wrong": 0,
+        "known_fallback": 50,
+        "unknown_total": 50,
+        "unknown_rejected": 50
+      },
+      "3.0": {
+        "known_total": 50,
+        "known_correct": 5,
+        "known_wrong": 0,
+        "known_fallback": 45,
+        "unknown_total": 50,
+        "unknown_rejected": 49
+      },
+      "10.0": {
+        "known_total": 50,
+        "known_correct": 28,
+        "known_wrong": 0,
+        "known_fallback": 22,
+        "unknown_total": 50,
+        "unknown_rejected": 39
+      },
+      "30.0": {
+        "known_total": 50,
+        "known_correct": 38,
+        "known_wrong": 2,
+        "known_fallback": 10,
+        "unknown_total": 50,
+        "unknown_rejected": 32
+      },
+      "100.0": {
+        "known_total": 50,
+        "known_correct": 39,
+        "known_wrong": 2,
+        "known_fallback": 9,
+        "unknown_total": 50,
+        "unknown_rejected": 28
+      }
+    },
+    "education": {
+      "1.0": {
+        "known_total": 50,
+        "known_correct": 0,
+        "known_wrong": 0,
+        "known_fallback": 50,
+        "unknown_total": 50,
+        "unknown_rejected": 50
+      },
+      "3.0": {
+        "known_total": 50,
+        "known_correct": 10,
+        "known_wrong": 0,
+        "known_fallback": 40,
+        "unknown_total": 50,
+        "unknown_rejected": 45
+      },
+      "10.0": {
+        "known_total": 50,
+        "known_correct": 24,
+        "known_wrong": 1,
+        "known_fallback": 25,
+        "unknown_total": 50,
+        "unknown_rejected": 36
+      },
+      "30.0": {
+        "known_total": 50,
+        "known_correct": 29,
+        "known_wrong": 4,
+        "known_fallback": 17,
+        "unknown_total": 50,
+        "unknown_rejected": 32
+      },
+      "100.0": {
+        "known_total": 50,
+        "known_correct": 31,
+        "known_wrong": 5,
+        "known_fallback": 14,
+        "unknown_total": 50,
+        "unknown_rejected": 26
+      }
+    }
+  }
+}

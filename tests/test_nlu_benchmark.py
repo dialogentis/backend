@@ -1,8 +1,10 @@
 import hashlib
 import json
 from collections import Counter
+from copy import deepcopy
 from pathlib import Path
 
+from benchmarks.nlu.cross_validate import calculate
 from benchmarks.nlu.evaluate import build_dataset
 from dialogentis.datasets.schema import validate_dataset
 
@@ -25,3 +27,12 @@ def test_benchmark_is_fixed_disjoint_and_has_required_coverage():
         assert all(train[intent.id] >= 10 and test[intent.id] >= 5 for intent in dataset.intents)
         assert sum(item.expected_fallback for item in dataset.examples) >= 20
         assert any(item.spans for item in dataset.examples if item.split == "test")
+
+
+def test_cross_validation_never_uses_held_out_examples():
+    fixture = json.loads((FIXTURE_DIR / "fixtures.json").read_text())["order_support"]
+    changed = deepcopy(fixture)
+    for item in changed["intents"]:
+        item["test"] = ["изменённая отложенная фраза"]
+    changed["unknown"] = ["другой неизвестный запрос"]
+    assert calculate("order_support", fixture) == calculate("order_support", changed)
