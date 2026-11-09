@@ -14,6 +14,7 @@ from dialogentis.artifact_service import (
     ArtifactQuotaExceeded,
     ArtifactUnavailable,
     cleanup_expired,
+    cleanup_orphans,
     read_artifact,
     reserve_artifact,
     write_artifact,
@@ -181,7 +182,7 @@ async def test_database_rejects_ready_artifact_without_checksum(context):
 async def test_scheduled_cleanup_finds_expired_tenants_with_limited_dispatcher(
     context, monkeypatch
 ):
-    factory, storage, settings, first, _ = context
+    factory, storage, settings, first, second = context
     monkeypatch.setenv("ARTIFACT_ROOT", str(storage.root))
     get_settings.cache_clear()
     async with unit_of_work(factory, organization_id=first) as db:
@@ -191,6 +192,15 @@ async def test_scheduled_cleanup_finds_expired_tenants_with_limited_dispatcher(
     async with unit_of_work(factory, organization_id=first) as db:
         artifact = await write_artifact(db, storage, first, artifact_id, [b"data"])
         artifact.expires_at = datetime.now(UTC) - timedelta(seconds=1)
+    orphan = uuid4()
+    storage.write(second, orphan, [b"orphan"], max_bytes=10)
+    orphan_path = storage.root / str(second) / str(orphan)
+    old = (datetime.now(UTC) - timedelta(hours=2)).timestamp()
+    os.utime(orphan_path, (old, old))
+    missing_org, missing_file = uuid4(), uuid4()
+    storage.write(missing_org, missing_file, [b"unknown"], max_bytes=10)
+    unknown_path = storage.root / str(missing_org) / str(missing_file)
+    os.utime(unknown_path, (old, old))
     dispatch = dispatcher_factory(Path("/run/dialogentis-dispatcher/password"))
     try:
         async with dispatch() as db:
@@ -204,6 +214,52 @@ async def test_scheduled_cleanup_finds_expired_tenants_with_limited_dispatcher(
         async with unit_of_work(factory, organization_id=first) as db:
             assert await db.get(Artifact, artifact_id) is None
         assert not (storage.root / str(first) / str(artifact_id)).exists()
+        assert not orphan_path.exists()
+        assert unknown_path.read_bytes() == b"unknown"
     finally:
         await dispatch.kw["bind"].dispose()
         get_settings.cache_clear()
+
+
+async def test_orphan_cleanup_waits_for_inflight_write(context, monkeypatch):
+    factory, storage, settings, first, _ = context
+    async with unit_of_work(factory, organization_id=first) as db:
+        artifact_id = (
+            await reserve_artifact(db, first, kind="temporary", max_bytes=10, settings=settings)
+        ).id
+    orphan = uuid4()
+    storage.write(first, orphan, [b"old"], max_bytes=10)
+    orphan_path = storage.root / str(first) / str(orphan)
+    old = (datetime.now(UTC) - timedelta(hours=2)).timestamp()
+    os.utime(orphan_path, (old, old))
+    started, finish = Event(), Event()
+    original = storage.write
+
+    def slow_write(*args, **kwargs):
+        started.set()
+        assert finish.wait(timeout=5)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(storage, "write", slow_write)
+
+    async def writing():
+        async with unit_of_work(factory, organization_id=first) as db:
+            await write_artifact(db, storage, first, artifact_id, [b"current"])
+
+    async def cleaning():
+        async with unit_of_work(factory, organization_id=first) as db:
+            return await cleanup_orphans(db, storage, first)
+
+    writer = asyncio.create_task(writing())
+    assert await asyncio.to_thread(started.wait, 2)
+    cleaner = asyncio.create_task(cleaning())
+    try:
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(asyncio.shield(cleaner), timeout=0.1)
+    finally:
+        finish.set()
+    await asyncio.wait_for(writer, timeout=3)
+    assert await asyncio.wait_for(cleaner, timeout=3) == 1
+    async with unit_of_work(factory, organization_id=first) as db:
+        assert await read_artifact(db, storage, first, artifact_id, max_bytes=10) == b"current"
+    assert not orphan_path.exists()

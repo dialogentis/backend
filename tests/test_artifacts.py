@@ -1,6 +1,7 @@
 import hashlib
 import os
 from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime, timedelta
 from threading import Barrier
 from typing import Any, cast
 from uuid import uuid4
@@ -116,3 +117,39 @@ def test_concurrent_finalization_never_replaces_a_published_file(tmp_path):
     value, info = winners[0]
     assert info is not None and storage.read(org, artifact, info, max_bytes=20) == value
     assert len(list((tmp_path / str(org)).iterdir())) == 1
+
+
+def test_orphan_scan_respects_metadata_age_filenames_and_symlinks(tmp_path):
+    root = tmp_path / "root"
+    external = tmp_path / "external"
+    root.mkdir()
+    external.mkdir()
+    (external / "keep").write_text("safe")
+    storage = ArtifactStorage(root)
+    org, known, orphan = uuid4(), uuid4(), uuid4()
+    info = storage.write(org, known, [b"known"], max_bytes=10)
+    storage.write(org, orphan, [b"orphan"], max_bytes=10)
+    directory = root / str(org)
+    temporary = directory / f".{uuid4()}.tmp"
+    temporary.write_bytes(b"temporary")
+    fresh = directory / str(uuid4())
+    fresh.write_bytes(b"fresh")
+    unknown = directory / "notes.txt"
+    unknown.write_text("safe")
+    linked = directory / str(uuid4())
+    linked.symlink_to(external / "keep")
+    (root / str(uuid4())).symlink_to(external, target_is_directory=True)
+    old = (datetime.now(UTC) - timedelta(hours=2)).timestamp()
+    for path in (directory / str(known), directory / str(orphan), temporary, unknown):
+        os.utime(path, (old, old))
+    assert storage.organizations() == [org]
+    assert (
+        storage.prune_orphans(org, {known}, older_than=datetime.now(UTC) - timedelta(hours=1)) == 2
+    )
+    assert storage.read(org, known, info, max_bytes=10) == b"known"
+    assert fresh.exists() and unknown.exists() and linked.is_symlink()
+    assert (external / "keep").read_text() == "safe"
+    assert not (directory / str(orphan)).exists() and not temporary.exists()
+    assert storage.prune_orphans(uuid4(), set(), older_than=datetime.now(UTC)) == 0
+    with pytest.raises(ValueError):
+        storage.prune_orphans(org, set(), older_than=datetime.now())

@@ -7,6 +7,7 @@ import stat
 from collections.abc import Generator, Iterable
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -24,6 +25,14 @@ class ArtifactInfo:
 class ArtifactStorage:
     def __init__(self, root: Path):
         self.root = root
+
+    @staticmethod
+    def _uuid_name(value: str) -> UUID | None:
+        try:
+            identifier = UUID(value)
+        except ValueError:
+            return None
+        return identifier if str(identifier) == value else None
 
     @contextmanager
     def _root(self) -> Generator[int]:
@@ -150,3 +159,57 @@ class ArtifactStorage:
                 os.fsync(root)
             except FileNotFoundError:
                 pass
+
+    def organizations(self) -> list[UUID]:
+        with self._root() as root:
+            result = []
+            for name in os.listdir(root):
+                identifier = self._uuid_name(name)
+                if identifier is None:
+                    continue
+                try:
+                    entry = os.stat(name, dir_fd=root, follow_symlinks=False)
+                except FileNotFoundError:
+                    continue
+                if stat.S_ISDIR(entry.st_mode):
+                    result.append(identifier)
+            return result
+
+    def prune_orphans(
+        self, organization_id: UUID, known_ids: set[UUID], *, older_than: datetime
+    ) -> int:
+        if not isinstance(organization_id, UUID):
+            raise TypeError("Organization ID must be a UUID")
+        if older_than.tzinfo is None or older_than.utcoffset() is None:
+            raise ValueError("Cutoff must have a timezone")
+        with self._root() as root:
+            try:
+                tenant = os.open(
+                    str(organization_id), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root
+                )
+            except FileNotFoundError:
+                return 0
+            try:
+                directory = os.fstat(tenant)
+                if directory.st_uid != os.geteuid() or directory.st_mode & 0o077:
+                    raise PermissionError("Artifact directory is not private")
+                removed = 0
+                for name in os.listdir(tenant):
+                    temporary = name.startswith(".") and name.endswith(".tmp")
+                    identifier = self._uuid_name(name[1:-4] if temporary else name)
+                    if identifier is None or (not temporary and identifier in known_ids):
+                        continue
+                    try:
+                        entry = os.stat(name, dir_fd=tenant, follow_symlinks=False)
+                        if stat.S_ISREG(entry.st_mode) and entry.st_mtime < older_than.timestamp():
+                            os.unlink(name, dir_fd=tenant)
+                            removed += 1
+                    except FileNotFoundError:
+                        continue
+                    if removed == 100:
+                        break
+                if removed:
+                    os.fsync(tenant)
+                return removed
+            finally:
+                os.close(tenant)

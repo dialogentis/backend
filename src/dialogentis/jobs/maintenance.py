@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -7,7 +8,7 @@ from taskiq import Context, TaskiqDepends, TaskiqScheduler
 from taskiq.schedule_sources import LabelScheduleSource
 
 from dialogentis.artifact_records import Artifact
-from dialogentis.artifact_service import ArtifactUnavailable, cleanup_expired
+from dialogentis.artifact_service import ArtifactUnavailable, cleanup_expired, cleanup_orphans
 from dialogentis.artifacts import ArtifactStorage
 from dialogentis.config import get_settings
 from dialogentis.db import session_factory, unit_of_work
@@ -39,7 +40,8 @@ async def reconcile_once(
                 if await recover_tenant(factory, organization_id, retryable_kinds) < 100:
                     break
         storage = ArtifactStorage(get_settings().artifact_root)
-        for organization_id in artifact_organizations:
+        filesystem_organizations = await asyncio.to_thread(storage.organizations)
+        for organization_id in set(artifact_organizations) | set(filesystem_organizations):
             for _ in range(10):
                 try:
                     async with unit_of_work(factory, organization_id=organization_id) as db:
@@ -48,6 +50,12 @@ async def reconcile_once(
                     break
                 if removed < 100:
                     break
+            try:
+                async with unit_of_work(factory, organization_id=organization_id) as db:
+                    await cleanup_orphans(db, storage, organization_id)
+            except ArtifactUnavailable:
+                # shortcut: unknown tenants need review; the journal handles confirmed deletions.
+                pass
         guard.add(MaintenanceRun(name="jobs.reconcile", window_start=window))
         await guard.execute(
             delete(MaintenanceRun).where(MaintenanceRun.window_start < window - timedelta(days=7))

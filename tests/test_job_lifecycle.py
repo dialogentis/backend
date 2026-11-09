@@ -431,6 +431,11 @@ async def test_scheduled_maintenance_task_runs_in_worker(factory, tmp_path):
     async with unit_of_work(factory, organization_id=org_id) as db:
         artifact = await write_artifact(db, storage, org_id, artifact_id, [b"expired"])
         artifact.expires_at = datetime.now(UTC) - timedelta(seconds=1)
+    orphan_id = uuid4()
+    storage.write(org_id, orphan_id, [b"orphan"], max_bytes=10)
+    orphan_path = tmp_path / str(org_id) / str(orphan_id)
+    old = (datetime.now(UTC) - timedelta(hours=2)).timestamp()
+    os.utime(orphan_path, (old, old))
     current = await claim(factory, job_id, org_id, frozenset({"training"}))
     assert current is not None
     async with unit_of_work(factory, organization_id=org_id) as db:
@@ -480,7 +485,12 @@ async def test_scheduled_maintenance_task_runs_in_worker(factory, tmp_path):
                 async with unit_of_work(factory, organization_id=org_id) as db:
                     job = await db.get(Job, job_id)
                     artifact = await db.get(Artifact, artifact_id)
-                    if job is not None and job.status == "failed" and artifact is None:
+                    if (
+                        job is not None
+                        and job.status == "failed"
+                        and artifact is None
+                        and not orphan_path.exists()
+                    ):
                         assert job.error_code == "worker_lost"
                         assert not (tmp_path / str(org_id) / str(artifact_id)).exists()
                         break

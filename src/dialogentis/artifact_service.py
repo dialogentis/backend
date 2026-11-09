@@ -181,3 +181,16 @@ async def cleanup_expired(db: AsyncSession, storage: ArtifactStorage, organizati
         await db.delete(artifact)
     await db.flush()
     return len(expired)
+
+
+async def cleanup_orphans(db: AsyncSession, storage: ArtifactStorage, organization_id: UUID) -> int:
+    await _active_organization(db, organization_id)
+    cutoff = await _now(db) - timedelta(hours=1)
+    identifiers = set(
+        (
+            await db.scalars(select(Artifact.id).where(Artifact.organization_id == organization_id))
+        ).all()
+    )
+    return await _blocking(
+        lambda: storage.prune_orphans(organization_id, identifiers, older_than=cutoff)
+    )
