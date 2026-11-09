@@ -8,6 +8,7 @@ from dialogentis.artifact_records import Artifact
 from dialogentis.artifacts import ArtifactStorage
 from dialogentis.auth.models import EmailOutbox
 from dialogentis.config import get_settings
+from dialogentis.datasets.export_models import ExportTask
 from dialogentis.db import unit_of_work
 from dialogentis.deletion_journal import write_marker
 from dialogentis.jobs.lifecycle import Apply, Claim, RetryableJobError
@@ -40,6 +41,7 @@ async def purge_tenant(
     except OSError as exc:
         raise RetryableJobError("Artifact storage is unavailable") from exc
     keep_job_id = record.job_id if record is not None else None
+    await db.execute(delete(ExportTask).where(ExportTask.organization_id == organization_id))
     await db.execute(delete(Artifact).where(Artifact.organization_id == organization_id))
     outbox = delete(OutboxEvent).where(OutboxEvent.organization_id == organization_id)
     jobs = delete(Job).where(Job.organization_id == organization_id)

@@ -18,6 +18,7 @@ from dialogentis.auth.security import COOKIE
 from dialogentis.body_limit import BodyLimitMiddleware
 from dialogentis.config import Settings, get_settings
 from dialogentis.contracts import ErrorResponse
+from dialogentis.datasets.export_routes import router as exports_router
 from dialogentis.datasets.routes import router as datasets_router
 from dialogentis.db import session_factory
 from dialogentis.deletions import router as deletions_router
@@ -58,6 +59,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(agents_router)
     app.include_router(drafts_router)
     app.include_router(datasets_router)
+    app.include_router(exports_router)
 
     @app.middleware("http")
     async def request_context(request: Request, call_next: Callable[[Request], Awaitable]):

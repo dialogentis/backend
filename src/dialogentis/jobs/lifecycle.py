@@ -21,6 +21,11 @@ class RetryableJobError(Exception):
     """A temporary error whose details must not be persisted in job metadata."""
 
 
+class PermanentJobError(Exception):
+    def __init__(self, code: str):
+        self.code = code
+
+
 @dataclass(frozen=True)
 class Claim:
     job_id: UUID

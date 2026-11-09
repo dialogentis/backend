@@ -9,12 +9,14 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from taskiq import Context, TaskiqDepends
 
 from dialogentis.config import get_settings
+from dialogentis.datasets.export_worker import prepare_export
 from dialogentis.db import session_factory, unit_of_work
 from dialogentis.deletion_worker import prepare_deletion
 from dialogentis.jobs.broker import broker
 from dialogentis.jobs.lifecycle import (
     Apply,
     Claim,
+    PermanentJobError,
     RetryableJobError,
     cancel,
     claim,
@@ -39,6 +41,7 @@ class Handler:
 
 HANDLERS: dict[str, Handler] = {
     "organization.deletion": Handler(prepare_deletion, timeout_seconds=120, retryable=True),
+    "dataset.export": Handler(prepare_export, timeout_seconds=120, retryable=True),
 }
 
 
@@ -46,9 +49,13 @@ class OrganizationUnavailable(Exception):
     pass
 
 
-async def _check_active(db: AsyncSession, organization_id: UUID) -> None:
+async def _check_active(
+    db: AsyncSession, organization_id: UUID, *, exclusive: bool = False
+) -> None:
     org = await db.scalar(
-        select(Organization).where(Organization.id == organization_id).with_for_update(read=True)
+        select(Organization)
+        .where(Organization.id == organization_id)
+        .with_for_update(read=not exclusive)
     )
     if org is None or org.deletion_requested_at is not None:
         raise OrganizationUnavailable
@@ -116,7 +123,7 @@ async def process_job(
 
             async def guarded_apply(db: AsyncSession, job) -> None:
                 if current.kind != "organization.deletion":
-                    await _check_active(db, current.organization_id)
+                    await _check_active(db, current.organization_id, exclusive=True)
                 await apply(db, job)
 
             await complete(factory, current, guarded_apply)
@@ -126,6 +133,9 @@ async def process_job(
     except RetryableJobError:
         await stop()
         await fail(factory, current, error_code="temporary_error", retryable=handler.retryable)
+    except PermanentJobError as exc:
+        await stop()
+        await fail(factory, current, error_code=exc.code, retryable=False)
     except SQLAlchemyError:
         await stop()
         await fail(factory, current, error_code="database_error", retryable=handler.retryable)

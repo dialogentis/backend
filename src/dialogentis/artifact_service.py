@@ -6,12 +6,13 @@ from datetime import timedelta
 from typing import Literal
 from uuid import UUID, uuid4
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from dialogentis.artifact_records import Artifact
 from dialogentis.artifacts import ArtifactInfo, ArtifactStorage
 from dialogentis.config import Settings
+from dialogentis.datasets.export_models import ExportTask
 from dialogentis.jobs.models import Job
 from dialogentis.models import Organization
 
@@ -175,6 +176,13 @@ async def cleanup_expired(db: AsyncSession, storage: ArtifactStorage, organizati
         )
     ).all()
     for artifact in expired:
+        await db.execute(
+            update(ExportTask)
+            .where(
+                ExportTask.organization_id == organization_id, ExportTask.artifact_id == artifact.id
+            )
+            .values(artifact_id=None)
+        )
         await _blocking(
             lambda artifact_id=artifact.id: storage.delete(organization_id, artifact_id)
         )
