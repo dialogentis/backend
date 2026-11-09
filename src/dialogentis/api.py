@@ -24,6 +24,7 @@ from dialogentis.datasets.routes import router as datasets_router
 from dialogentis.db import session_factory
 from dialogentis.deletions import router as deletions_router
 from dialogentis.drafts import router as drafts_router
+from dialogentis.flow_routes import router as flow_router
 from dialogentis.organizations import router as organizations_router
 from dialogentis.versions.routes import router as versions_router
 
@@ -60,6 +61,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(deletions_router)
     app.include_router(agents_router)
     app.include_router(drafts_router)
+    app.include_router(flow_router)
     app.include_router(datasets_router)
     app.include_router(exports_router)
     app.include_router(imports_router)
