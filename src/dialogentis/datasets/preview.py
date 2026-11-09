@@ -72,7 +72,11 @@ def convert_value(value: str, value_type: str) -> str | int | float | bool:
     raise ValueError("Invalid value type")
 
 
-def preview_entity(entity: Entity, text: str) -> Preview:
+def preview_entity(
+    entity: Entity, text: str, *, include_overlaps: bool = False, limit: int = 100
+) -> Preview:
+    if limit < 1:
+        raise ValueError("Match limit must be positive")
     found: list[tuple[int, int, str]] = []
     if entity.method == "regex":
         if not entity.pattern:
@@ -93,7 +97,7 @@ def preview_entity(entity: Entity, text: str) -> Preview:
                 start, end = match.span(group)
                 if 0 <= start < end:
                     found.append((start, end, text[start:end]))
-                    if len(found) > 100:
+                    if len(found) > limit:
                         break
         except (re2.error, UnicodeError) as exc:
             raise ValueError("Invalid pattern") from exc
@@ -123,20 +127,31 @@ def preview_entity(entity: Entity, text: str) -> Preview:
                 for term, value in current.get(None, []):
                     if normalized == term:
                         candidate = (original_start, end, value)
+                        if include_overlaps:
+                            found.append(candidate)
+                            if len(found) > limit:
+                                break
                         if best is None or end > best[1]:
                             best = candidate
+                if len(found) > limit:
+                    break
+            if include_overlaps:
+                if len(found) > limit:
+                    break
+                index += 1
+                continue
             if best is None:
                 index += 1
             else:
                 found.append(best)
-                if len(found) > 100:
+                if len(found) > limit:
                     break
                 while index < len(tokens) and tokens[index][0] < best[1]:
                     index += 1
     else:
         raise ValueError("Unsupported method")
     results: list[Match] = []
-    for start, end, raw in found[:100]:
+    for start, end, raw in found[:limit]:
         try:
             value = convert_value(raw, entity.value_type)
             results.append(Match(start=start, end=end, text=text[start:end], value=value))
@@ -144,4 +159,4 @@ def preview_entity(entity: Entity, text: str) -> Preview:
             results.append(
                 Match(start=start, end=end, text=text[start:end], value=None, error="invalid_value")
             )
-    return Preview(matches=results, truncated=len(found) > 100)
+    return Preview(matches=results, truncated=len(found) > limit)
