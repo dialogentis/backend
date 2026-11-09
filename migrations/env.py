@@ -7,6 +7,7 @@ import dialogentis.datasets.export_models  # noqa: F401 - register export tables
 import dialogentis.datasets.import_models  # noqa: F401 - register import tables
 import dialogentis.jobs.models  # noqa: F401 - register job tables
 import dialogentis.organizations  # noqa: F401 - register organization tables
+import dialogentis.versions.models  # noqa: F401 - register immutable version tables
 from dialogentis.config import get_settings
 from dialogentis.models import Base
 

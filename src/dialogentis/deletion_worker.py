@@ -16,6 +16,7 @@ from dialogentis.jobs.lifecycle import Apply, Claim, RetryableJobError
 from dialogentis.jobs.models import Job, OutboxEvent
 from dialogentis.models import Agent, AgentDraft, Membership, Organization
 from dialogentis.organizations import AuditEvent, Invitation, OrganizationDeletion
+from dialogentis.versions.models import AgentVersion
 
 
 async def purge_tenant(
@@ -44,6 +45,7 @@ async def purge_tenant(
     keep_job_id = record.job_id if record is not None else None
     await db.execute(delete(ExportTask).where(ExportTask.organization_id == organization_id))
     await db.execute(delete(ImportTask).where(ImportTask.organization_id == organization_id))
+    await db.execute(delete(AgentVersion).where(AgentVersion.organization_id == organization_id))
     await db.execute(delete(Artifact).where(Artifact.organization_id == organization_id))
     outbox = delete(OutboxEvent).where(OutboxEvent.organization_id == organization_id)
     jobs = delete(Job).where(Job.organization_id == organization_id)
