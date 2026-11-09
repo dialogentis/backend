@@ -9,6 +9,7 @@ from dialogentis.contracts import InputModel
 from dialogentis.datasets.csv_import import MAX_ERRORS, MAX_FILE_BYTES, unique_object
 from dialogentis.datasets.schema import Dataset, Entity, Example, Intent, validate_dataset
 from dialogentis.flow_schema import Flow
+from dialogentis.nlu.settings import NLUSettings
 
 
 class PortableConfig(InputModel):
@@ -17,6 +18,7 @@ class PortableConfig(InputModel):
     examples: list[Example] = Field(max_length=13000)
     slots: list[object] = Field(max_length=0)
     flow: Flow
+    nlu_settings: NLUSettings = Field(default_factory=NLUSettings)
 
     @field_validator("flow", mode="before")
     @classmethod
@@ -111,6 +113,10 @@ def _safe_path(path: tuple) -> tuple[str | int, ...]:
         "examples",
         "slots",
         "flow",
+        "nlu_settings",
+        "score",
+        "margin",
+        "similarity",
         "id",
         "code",
         "name",
@@ -193,6 +199,8 @@ def preview_json(
     if mode == "merge":
         if imported.flow != current.flow or imported.slots != current.slots:
             warnings.append(JsonIssue(("config", "flow"), "flow_not_imported"))
+        if imported.nlu_settings != current.nlu_settings:
+            warnings.append(JsonIssue(("config", "nlu_settings"), "settings_not_imported"))
         try:
             dataset = Dataset(
                 intents=[*current.intents, *imported.intents],
@@ -207,6 +215,7 @@ def preview_json(
             examples=dataset.examples,
             slots=current.slots,
             flow=current.flow,
+            nlu_settings=current.nlu_settings,
         )
     else:
         candidate = imported

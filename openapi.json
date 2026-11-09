@@ -9717,6 +9717,9 @@
           },
           "flow": {
             "$ref": "#/components/schemas/Flow"
+          },
+          "nlu_settings": {
+            "$ref": "#/components/schemas/NLUSettings"
           }
         },
         "additionalProperties": false,
@@ -11348,6 +11351,34 @@
         ],
         "title": "MembershipView"
       },
+      "NLUSettings": {
+        "properties": {
+          "score": {
+            "type": "number",
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Score",
+            "default": 0.55
+          },
+          "margin": {
+            "type": "number",
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Margin",
+            "default": 0.15
+          },
+          "similarity": {
+            "type": "number",
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Similarity",
+            "default": 0.2
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "NLUSettings"
+      },
       "OrganizationInput": {
         "properties": {
           "name": {
@@ -11488,6 +11519,9 @@
             "type": "integer",
             "title": "Training Examples"
           },
+          "nlu_settings": {
+            "$ref": "#/components/schemas/NLUSettings"
+          },
           "intents": {
             "$ref": "#/components/schemas/IntentSummary"
           },
@@ -11525,6 +11559,7 @@
         "required": [
           "version_id",
           "training_examples",
+          "nlu_settings",
           "intents",
           "entities",
           "intent_catalog",

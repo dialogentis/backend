@@ -3,7 +3,7 @@
 import asyncio
 import hashlib
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from typing import Literal
 from uuid import UUID
 
@@ -20,7 +20,6 @@ from dialogentis.drafts import DraftConfig
 from dialogentis.jobs.enqueue import enqueue
 from dialogentis.jobs.models import Job
 from dialogentis.models import User
-from dialogentis.nlu.intent import Thresholds
 from dialogentis.organizations import audit, organization_context
 from dialogentis.versions.models import AgentVersion
 
@@ -131,7 +130,7 @@ async def prepare_version(
     errors, warnings = await asyncio.to_thread(validate_configuration, config)
     if errors:
         raise DomainValidationError([issue_view(item).model_dump() for item in errors[:1000]])
-    settings = asdict(Thresholds())
+    settings = config["nlu_settings"]
     snapshot = {"schema_version": draft.schema_version, "config": config, "nlu_settings": settings}
     number = await db.scalar(
         select(func.coalesce(func.max(AgentVersion.number), 0)).where(

@@ -1,5 +1,5 @@
 import os
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import select
@@ -116,3 +116,41 @@ async def test_invalid_version_request_does_not_enqueue(app):
         assert result.status_code == 422 and result.json()["error"]["details"]
         async with unit_of_work(app.state.session_factory, organization_id=org_id) as db:
             assert (await db.scalars(select(AgentVersion))).all() == []
+
+
+async def test_settings_are_saved_in_version_and_applied_to_report(app):
+    async with client_for(app) as owner:
+        _, org_id, agent_id = await create_agent(app, owner)
+        await populate(app, org_id, agent_id)
+        base = f"/api/v1/organizations/{org_id}/agents/{agent_id}"
+        draft = (await owner.get(f"{base}/draft")).json()
+        assert draft["config"]["nlu_settings"] == {"score": 0.55, "margin": 0.15, "similarity": 0.2}
+        grant = (await owner.post(f"{base}/edit-lease", json={"tab_id": str(uuid4())})).json()
+        headers = {
+            "X-Edit-Lease": grant["lease_token"],
+            "X-Edit-Fence": str(grant["fencing_counter"]),
+            "If-Match": '"rev-1"',
+        }
+        body = {"schema_version": 1, "config": draft["config"]}
+        settings = {"score": 0.73, "margin": 0.25, "similarity": 0.31}
+        body["config"]["nlu_settings"] = settings
+        saved = await owner.put(f"{base}/draft", headers=headers, json=body)
+        assert saved.status_code == 200 and saved.json()["config"]["nlu_settings"] == settings
+        created = await owner.post(
+            f"{base}/versions",
+            json={"source_revision": 2},
+            headers={"Idempotency-Key": "custom-settings"},
+        )
+        assert created.status_code == 202, created.text
+        version_id, job_id = created.json()["version_id"], created.json()["job_id"]
+        body["config"]["nlu_settings"] = {"score": 0.1, "margin": 0.1, "similarity": 0.1}
+        saved = await owner.put(
+            f"{base}/draft", headers={**headers, "If-Match": '"rev-2"'}, json=body
+        )
+        assert saved.status_code == 200
+        await process_job(app.state.session_factory, UUID(job_id), org_id, HANDLERS, "training")
+        report = await owner.get(f"{base}/versions/{version_id}/report")
+        assert report.status_code == 200 and report.json()["nlu_settings"] == settings
+        async with unit_of_work(app.state.session_factory, organization_id=org_id) as db:
+            version = await db.get(AgentVersion, UUID(version_id))
+            assert version is not None and version.snapshot["nlu_settings"] == settings

@@ -16,6 +16,7 @@ from dialogentis.models import Agent
 from dialogentis.nlu.entity_evaluation import EntityMetrics, EntitySpan
 from dialogentis.nlu.intent import FallbackReason
 from dialogentis.nlu.intent_evaluation import ClassMetrics
+from dialogentis.nlu.settings import NLUSettings
 from dialogentis.organizations import organization_context
 from dialogentis.versions.models import AgentVersion
 from dialogentis.versions.prepare import TrainingInProgress, prepare_version, version_status
@@ -103,6 +104,7 @@ class CatalogEntry(BaseModel):
 class ReportView(BaseModel):
     version_id: UUID
     training_examples: int
+    nlu_settings: NLUSettings
     intents: IntentSummary
     entities: EntitySummary
     intent_catalog: list[CatalogEntry]
@@ -259,6 +261,7 @@ async def get_report(
     return ReportView(
         version_id=version.id,
         training_examples=report["training_examples"],
+        nlu_settings=NLUSettings.model_validate(version.snapshot["nlu_settings"]),
         intents=IntentSummary.model_validate(intent),
         entities=EntitySummary.model_validate(entity),
         intent_catalog=[CatalogEntry.model_validate(item) for item in config["intents"]],
