@@ -43,7 +43,7 @@ class PortableConfig(InputModel):
         allowed = {
             "start": set(),
             "switch_intent": set(),
-            "fallback": {"resume_node_id", "text"},
+            "fallback": {"resume_node_id", "text", "example"},
             "say": {"text"},
             "end": {"text"},
         }
@@ -66,6 +66,10 @@ class PortableConfig(InputModel):
                 not isinstance(node.config["text"], str) or len(node.config["text"]) > 4000
             ):
                 raise ValueError("Invalid node text")
+            if "example" in node.config and (
+                not isinstance(node.config["example"], str) or len(node.config["example"]) > 500
+            ):
+                raise ValueError("Invalid fallback example")
             if "resume_node_id" in node.config:
                 reference = node.config["resume_node_id"]
                 try:

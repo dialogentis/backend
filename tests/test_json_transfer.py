@@ -42,6 +42,7 @@ def encode(config):
 
 def test_json_round_trip_preserves_text_offsets_and_graph():
     config = populated()
+    config.flow.nodes[2].config["example"] = "Где мой заказ?"
     parsed, errors = parse_json(export_json(config))
     assert not errors and parsed == config
     assert parsed is not None

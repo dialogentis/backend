@@ -26,7 +26,10 @@ async def test_structural_validation_is_revision_bound_and_tenant_scoped(app):
         assert result.status_code == 200
         assert result.json()["scope"] == "flow_structure" and not result.json()["complete"]
         assert result.json()["errors"] == []
-        assert {issue["code"] for issue in result.json()["warnings"]} == {"unreachable_node"}
+        assert {issue["code"] for issue in result.json()["warnings"]} == {
+            "unreachable_node",
+            "missing_fallback_example",
+        }
         assert (await owner.post(base, json={"revision": 2})).status_code == 409
         assert (await owner.post(base, json={"revision": True})).status_code == 422
         assert (await viewer.post(base, json={"revision": 1})).status_code == 404

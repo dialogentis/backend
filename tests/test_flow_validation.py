@@ -25,7 +25,18 @@ def edge(source, target, handle="next"):
 def test_default_flow_and_partial_validation():
     errors, warnings = validate_flow(empty_config())
     assert not errors
-    assert codes(warnings) == {"unreachable_node"}
+    assert codes(warnings) == {"unreachable_node", "missing_fallback_example"}
+
+
+def test_fallback_example_must_be_explicit_plain_text():
+    config = empty_config()
+    fallback = config["flow"]["nodes"][2]
+    for text in ("<b>Текст</b>", "{{city}}", "x" * 501):
+        fallback["config"]["example"] = text
+        assert "invalid_fallback_example" in codes(validate_flow(config)[0])
+    fallback["config"]["example"] = "Где мой заказ?"
+    errors, warnings = validate_flow(config)
+    assert not errors and "missing_fallback_example" not in codes(warnings)
 
 
 def test_missing_connections_duplicate_ids_and_start_incoming():
@@ -52,7 +63,7 @@ def test_missing_connections_duplicate_ids_and_start_incoming():
         "missing_target",
         "invalid_resume",
     } <= codes(errors)
-    assert not warnings  # ambiguous duplicate identifiers prevent reliable reachability
+    assert "unreachable_node" not in codes(warnings)  # Duplicate IDs make reachability ambiguous.
 
 
 def test_missing_start_required_outputs_and_invalid_flow_are_reported_without_input():
@@ -71,6 +82,7 @@ def test_unreachable_nodes_and_resume_links():
     flow = config["flow"]
     fallback, end = flow["nodes"][2:]
     fallback["config"]["resume_node_id"] = end["id"]
+    fallback["config"]["example"] = "Где мой заказ?"
     errors, warnings = validate_flow(config)
     assert not errors and not warnings
     fallback["config"]["resume_node_id"] = str(uuid4())
@@ -110,6 +122,7 @@ def test_immediate_cycles_and_waiting_paths():
 def test_switch_intent_outputs_check_the_referenced_intent():
     config = empty_config()
     switch, end = config["flow"]["nodes"][1], config["flow"]["nodes"][3]
+    config["flow"]["nodes"][2]["config"]["example"] = "Где мой заказ?"
     intent_id = str(uuid4())
     config["intents"] = [{"id": intent_id, "code": "order", "name": "Заказ", "enabled": False}]
     config["flow"]["edges"].append(edge(switch, end, intent_id))

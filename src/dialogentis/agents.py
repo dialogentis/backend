@@ -233,7 +233,7 @@ def copy_config(config: dict) -> dict:
     allowed = {
         "start": set(),
         "switch_intent": set(),
-        "fallback": {"resume_node_id", "text"},
+        "fallback": {"resume_node_id", "text", "example"},
         "say": {"text"},
         "end": {"text"},
     }
@@ -269,6 +269,10 @@ def copy_config(config: dict) -> dict:
     for node in flow["nodes"]:
         if "text" in node["config"] and not isinstance(node["config"]["text"], str):
             raise HTTPException(409, "Нельзя скопировать некорректный текст блока")
+        if "example" in node["config"] and (
+            not isinstance(node["config"]["example"], str) or len(node["config"]["example"]) > 500
+        ):
+            raise HTTPException(409, "Нельзя скопировать некорректный пример запроса")
         reference = node["config"].get("resume_node_id")
         if "resume_node_id" in node["config"] and (
             not isinstance(reference, str) or reference not in mapping

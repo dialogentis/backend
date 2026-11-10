@@ -176,6 +176,34 @@ def validate_flow(config: dict) -> tuple[list[Issue], list[Issue]]:
                     Issue(path, "missing_output", "Не подключён обязательный выход блока")
                 )
         if node.type == "fallback":
+            example = node.config.get("example")
+            if example is None or (isinstance(example, str) and not example.strip()):
+                warnings.append(
+                    Issue(
+                        (*path, "config", "example"),
+                        "missing_fallback_example",
+                        "Добавьте пример запроса для повторных ошибок распознавания",
+                    )
+                )
+            elif not isinstance(example, str) or len(example) > 500:
+                errors.append(
+                    Issue(
+                        (*path, "config", "example"),
+                        "invalid_fallback_example",
+                        "Пример запроса должен быть текстом не длиннее 500 символов",
+                    )
+                )
+            else:
+                try:
+                    parse_template(example, [])
+                except TemplateError:
+                    errors.append(
+                        Issue(
+                            (*path, "config", "example"),
+                            "invalid_fallback_example",
+                            "Пример запроса должен быть обычным текстом без шаблонов и HTML",
+                        )
+                    )
             try:
                 raw = node.config.get("resume_node_id")
                 resume = UUID(raw) if isinstance(raw, str) else None
