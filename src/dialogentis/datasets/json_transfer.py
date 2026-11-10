@@ -5,6 +5,7 @@ from uuid import UUID
 
 from pydantic import Field, StrictInt, ValidationError, field_validator, model_validator
 
+from dialogentis.ask_slot import AskSlotDraftConfig
 from dialogentis.contracts import InputModel
 from dialogentis.datasets.csv_import import MAX_ERRORS, MAX_FILE_BYTES, unique_object
 from dialogentis.datasets.schema import Dataset, Entity, Example, Intent, validate_dataset
@@ -46,6 +47,7 @@ class PortableConfig(InputModel):
             "fallback": {"resume_node_id", "text", "example"},
             "say": {"text"},
             "end": {"text"},
+            "ask_slot": {"slot_id", "prompt", "entity_id", "max_attempts", "checks"},
         }
         if self.flow.layout:
             raise ValueError("Unsupported layout")
@@ -58,6 +60,7 @@ class PortableConfig(InputModel):
             "start": {"next"},
             "say": {"next"},
             "switch_intent": {"fallback", *(str(intent.id) for intent in self.intents)},
+            "ask_slot": {"success", "invalid", "exhausted"},
         }
         for node in self.flow.nodes:
             if node.type not in allowed or set(node.config) - allowed[node.type]:
@@ -70,6 +73,14 @@ class PortableConfig(InputModel):
                 not isinstance(node.config["example"], str) or len(node.config["example"]) > 500
             ):
                 raise ValueError("Invalid fallback example")
+            if node.type == "ask_slot":
+                ask = AskSlotDraftConfig.model_validate(node.config)
+                if ask.slot_id is not None and ask.slot_id not in {slot.id for slot in self.slots}:
+                    raise ValueError("Unknown slot")
+                if ask.entity_id is not None and ask.entity_id not in {
+                    entity.id for entity in self.entities
+                }:
+                    raise ValueError("Unknown entity")
             if "resume_node_id" in node.config:
                 reference = node.config["resume_node_id"]
                 try:

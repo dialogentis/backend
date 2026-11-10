@@ -107,6 +107,42 @@ def test_copy_remaps_slots_without_changing_codes_or_default_values():
     assert clone["flow"]["nodes"][2]["config"]["text"] == "Город: {{city}}"
 
 
+def test_copy_remaps_ask_slot_and_entity_references():
+    config = empty_config()
+    slot_id, entity_id, node_id = (str(uuid4()) for _ in range(3))
+    config["slots"] = [{"id": slot_id, "code": "city"}]
+    config["entities"] = [
+        {
+            "id": entity_id,
+            "code": "city",
+            "name": "Город",
+            "value_type": "string",
+            "method": "dictionary",
+            "dictionary": [{"value": "Москва"}],
+        }
+    ]
+    config["flow"]["nodes"].append(
+        {
+            "id": node_id,
+            "type": "ask_slot",
+            "config": {
+                "slot_id": slot_id,
+                "entity_id": entity_id,
+                "prompt": "Город?",
+                "max_attempts": 2,
+                "checks": [{"kind": "min_length", "value": 2}],
+            },
+            "position": {"x": 1, "y": 2},
+        }
+    )
+    clone = copy_config(config)
+    cloned = next(node for node in clone["flow"]["nodes"] if node["type"] == "ask_slot")
+    assert cloned["id"] != node_id
+    assert cloned["config"]["slot_id"] == clone["slots"][0]["id"] != slot_id
+    assert cloned["config"]["entity_id"] == clone["entities"][0]["id"] != entity_id
+    assert cloned["config"]["checks"] == [{"kind": "min_length", "value": 2}]
+
+
 def test_copy_rejects_unknown_dataset_references():
     config = empty_config()
     config["examples"] = [

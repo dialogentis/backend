@@ -215,6 +215,7 @@ async def get_agent(
 
 def copy_config(config: dict) -> dict:
     """Copy only configurations whose internal references are understood."""
+    from dialogentis.ask_slot import AskSlotDraftConfig
     from dialogentis.datasets.schema import Dataset
     from dialogentis.drafts import DraftConfig
     from dialogentis.slots import validate_slots
@@ -236,6 +237,7 @@ def copy_config(config: dict) -> dict:
         "fallback": {"resume_node_id", "text", "example"},
         "say": {"text"},
         "end": {"text"},
+        "ask_slot": {"slot_id", "prompt", "entity_id", "max_attempts", "checks"},
     }
     if flow["layout"]:
         raise HTTPException(409, "Копирование этого черновика пока недоступно")
@@ -259,6 +261,7 @@ def copy_config(config: dict) -> dict:
         "start": {"next"},
         "say": {"next"},
         "switch_intent": {"fallback", *intent_ids},
+        "ask_slot": {"success", "invalid", "exhausted"},
     }
     handles = [(edge["source"], edge["source_handle"]) for edge in flow["edges"]]
     if len(handles) != len(set(handles)) or any(
@@ -273,6 +276,17 @@ def copy_config(config: dict) -> dict:
             not isinstance(node["config"]["example"], str) or len(node["config"]["example"]) > 500
         ):
             raise HTTPException(409, "Нельзя скопировать некорректный пример запроса")
+        if node["type"] == "ask_slot":
+            try:
+                ask = AskSlotDraftConfig.model_validate(node["config"])
+            except ValidationError:
+                raise HTTPException(409, "Нельзя скопировать некорректный блок параметра") from None
+            if ask.slot_id is not None and ask.slot_id not in {slot.id for slot in slots}:
+                raise HTTPException(409, "Нельзя скопировать сценарий с отсутствующим параметром")
+            if ask.entity_id is not None and ask.entity_id not in {
+                entity.id for entity in dataset.entities
+            }:
+                raise HTTPException(409, "Нельзя скопировать сценарий с отсутствующей сущностью")
         reference = node["config"].get("resume_node_id")
         if "resume_node_id" in node["config"] and (
             not isinstance(reference, str) or reference not in mapping
@@ -311,6 +325,11 @@ def copy_config(config: dict) -> dict:
         node["id"] = mapping[node["id"]]
         if "resume_node_id" in node["config"]:
             node["config"]["resume_node_id"] = mapping[node["config"]["resume_node_id"]]
+        if node["type"] == "ask_slot":
+            for key, collection in (("slot_id", "slots"), ("entity_id", "entities")):
+                reference = node["config"].get(key)
+                if reference is not None:
+                    node["config"][key] = data_mapping[collection][UUID(reference)]
     for edge in clone["flow"]["edges"]:
         edge["id"] = str(uuid4())
         if node_types[edge["source"]] == "switch_intent" and edge["source_handle"] != "fallback":

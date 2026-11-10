@@ -137,6 +137,42 @@ def test_switch_intent_outputs_check_the_referenced_intent():
     )
 
 
+def test_ask_slot_configuration_and_all_three_outputs():
+    config = empty_config()
+    slot_id, entity_id = str(uuid4()), str(uuid4())
+    config["slots"] = [{"id": slot_id, "code": "city", "value_type": "string"}]
+    config["entities"] = [
+        {
+            "id": entity_id,
+            "code": "city",
+            "name": "Город",
+            "value_type": "string",
+            "method": "dictionary",
+            "dictionary": [{"value": "Омск"}],
+        }
+    ]
+    ask = node("ask_slot")
+    ask["config"] = {
+        "slot_id": slot_id,
+        "entity_id": entity_id,
+        "prompt": "Укажите город",
+        "max_attempts": 2,
+        "checks": [{"kind": "min_length", "value": 2}],
+    }
+    config["flow"]["nodes"].append(ask)
+    end = config["flow"]["nodes"][3]
+    config["flow"]["edges"] += [
+        edge(ask, end, handle) for handle in ("success", "invalid", "exhausted")
+    ]
+    assert not validate_flow(config)[0]
+    config["flow"]["edges"].pop()
+    assert "missing_output" in codes(validate_flow(config)[0])
+    config["entities"][0]["value_type"] = "integer"
+    assert "entity_type_mismatch" in codes(validate_flow(config)[0])
+    ask["config"]["checks"] = [{"kind": "pattern", "pattern": r"(a)\1"}]
+    assert "invalid_ask_slot" in codes(validate_flow(config)[0])
+
+
 def test_structural_check_handles_limits():
     config = empty_config()
     nodes = [node("start"), *[node("condition") for _ in range(299)]]

@@ -142,9 +142,9 @@ def test_invalid_nlu_or_slot_values_do_not_expose_private_input():
     config["slots"][0]["value_type"] = "integer"
     config["slots"][0]["default"] = None
     engine = RuntimeEngine(version, config, lambda _: Prediction(uuid4(), intent_id))
-    invalid = engine.start({"client": "PRIVATE_SENTINEL"})
-    assert invalid.error_code == "invalid_slot_value"
-    assert "PRIVATE_SENTINEL" not in repr(asdict(invalid))
+    with pytest.raises(RuntimeFault, match="invalid_slot_values") as invalid:
+        engine.start({"client": "PRIVATE_SENTINEL"})
+    assert "PRIVATE_SENTINEL" not in str(invalid.value)
     waiting = engine.start({"client": 5})
     result = engine.send(waiting.state, "PRIVATE_SENTINEL")
     assert result.error_code == "model_version_mismatch"

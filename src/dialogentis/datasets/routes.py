@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from dialogentis.agents import agent_and_draft
 from dialogentis.api_errors import DomainValidationError
+from dialogentis.ask_slot import validate_ask_references
 from dialogentis.auth.security import VerifiedUser
 from dialogentis.contracts import InputModel
 from dialogentis.datasets.preview import Preview, run_preview
@@ -100,14 +101,17 @@ def validate_configuration(config: dict) -> tuple[list[Issue], list[Issue]]:
             for error in exc.errors(include_input=False, include_context=False, include_url=False)
         ], []
     errors, warnings = validate_dataset(dataset)
-    _, slot_errors = validate_slots(config.get("slots", []))
+    slots, slot_errors = validate_slots(config.get("slots", []))
     errors.extend(slot_errors)
     try:
         flow = Flow.model_validate(config.get("flow"))
     except ValidationError:
         return errors, warnings
     branch_errors, branch_warnings = validate_intent_outputs(flow, dataset.intents)
-    return [*errors, *branch_errors], [*warnings, *branch_warnings]
+    return [*errors, *branch_errors, *validate_ask_references(flow, slots, dataset.entities)], [
+        *warnings,
+        *branch_warnings,
+    ]
 
 
 def issue_view(issue: Issue) -> ValidationIssue:

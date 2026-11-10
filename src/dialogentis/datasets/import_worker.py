@@ -90,6 +90,8 @@ def analyze_import(
                 if item.code
                 in {
                     "unknown_intent_output",
+                    "unknown_ask_slot",
+                    "unknown_ask_entity",
                     "invalid_slots",
                     "invalid_slot",
                     "duplicate_slot_id",

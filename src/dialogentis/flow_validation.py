@@ -5,7 +5,8 @@ from uuid import UUID
 
 from pydantic import ValidationError
 
-from dialogentis.datasets.schema import Intent
+from dialogentis.ask_slot import AskSlotConfig, check_ask_config
+from dialogentis.datasets.schema import Entity, Intent
 from dialogentis.datasets.validation import Issue
 from dialogentis.flow_schema import Flow
 from dialogentis.slots import validate_slots
@@ -46,6 +47,19 @@ def validate_flow(config: dict) -> tuple[list[Issue], list[Issue]]:
     warnings: list[Issue] = []
     slots, slot_errors = validate_slots(config.get("slots", []))
     errors.extend(slot_errors)
+    slot_by_id = {slot.id: slot for slot in slots}
+    entity_by_id = {}
+    if any(node.type == "ask_slot" for node in flow.nodes):
+        try:
+            entities = config.get("entities", [])
+            if not isinstance(entities, list):
+                raise ValueError("Invalid entities")
+            parsed_entities = [Entity.model_validate(item) for item in entities]
+            entity_by_id = {entity.id: entity for entity in parsed_entities}
+            if len(entity_by_id) != len(parsed_entities):
+                raise ValueError("Duplicate entities")
+        except ValidationError, ValueError:
+            errors.append(Issue(("entities",), "invalid_entities", "Проверьте данные сущностей"))
     try:
         intents = config.get("intents", [])
         if not isinstance(intents, list):
@@ -131,6 +145,7 @@ def validate_flow(config: dict) -> tuple[list[Issue], list[Issue]]:
             "end": set(),
             "return": set(),
             "fallback": set(),
+            "ask_slot": {"success", "invalid", "exhausted"},
         }
         if source_node.type in allowed and edge.source_handle not in allowed[source_node.type]:
             errors.append(
@@ -169,12 +184,67 @@ def validate_flow(config: dict) -> tuple[list[Issue], list[Issue]]:
                             "unknown_template_slot": "В тексте указан несуществующий параметр",
                         }.get(exc.code, "Проверьте шаблон текста ответа")
                         errors.append(Issue((*path, "config", "text"), exc.code, message))
-        required = {"start": ("next",), "say": ("next",), "switch_intent": ("fallback",)}
+        required = {
+            "start": ("next",),
+            "say": ("next",),
+            "switch_intent": ("fallback",),
+            "ask_slot": ("success", "invalid", "exhausted"),
+        }
         for handle in required.get(node.type, ()):
             if (node.id, handle) not in handles:
                 errors.append(
                     Issue(path, "missing_output", "Не подключён обязательный выход блока")
                 )
+        if node.type == "ask_slot":
+            try:
+                ask = AskSlotConfig.model_validate(node.config)
+            except ValidationError:
+                errors.append(
+                    Issue(
+                        (*path, "config"),
+                        "invalid_ask_slot",
+                        "Настройте параметр, текст вопроса и проверки",
+                    )
+                )
+            else:
+                slot = slot_by_id.get(ask.slot_id)
+                if slot is None:
+                    errors.append(
+                        Issue(
+                            (*path, "config", "slot_id"),
+                            "unknown_slot",
+                            "Параметр для сбора не найден",
+                        )
+                    )
+                else:
+                    try:
+                        check_ask_config(ask, slot, slots)
+                    except TemplateError, ValueError:
+                        errors.append(
+                            Issue(
+                                (*path, "config"),
+                                "invalid_ask_slot",
+                                "Проверьте текст вопроса и проверки параметра",
+                            )
+                        )
+                    if ask.entity_id is not None:
+                        entity = entity_by_id.get(ask.entity_id)
+                        if entity is None:
+                            errors.append(
+                                Issue(
+                                    (*path, "config", "entity_id"),
+                                    "unknown_entity",
+                                    "Сущность для сбора не найдена",
+                                )
+                            )
+                        elif entity.value_type != slot.value_type:
+                            errors.append(
+                                Issue(
+                                    (*path, "config", "entity_id"),
+                                    "entity_type_mismatch",
+                                    "Типы сущности и параметра должны совпадать",
+                                )
+                            )
         if node.type == "fallback":
             example = node.config.get("example")
             if example is None or (isinstance(example, str) and not example.strip()):

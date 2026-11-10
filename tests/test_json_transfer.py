@@ -101,6 +101,32 @@ def test_json_round_trip_preserves_typed_slots():
     assert restored.slots[0].default == "100.25"
 
 
+def test_json_round_trip_preserves_ask_slot_and_checks():
+    config = populated().model_dump(mode="json")
+    slot_id = str(uuid4())
+    config["slots"] = [{"id": slot_id, "code": "city"}]
+    entity_id = config["entities"][0]["id"]
+    config["flow"]["nodes"].append(
+        {
+            "id": str(uuid4()),
+            "type": "ask_slot",
+            "config": {
+                "slot_id": slot_id,
+                "entity_id": entity_id,
+                "prompt": "Город?",
+                "checks": [{"kind": "pattern", "pattern": "[А-Яа-я]+"}],
+            },
+            "position": {"x": 0, "y": 0},
+        }
+    )
+    parsed, errors = parse_json(encode(config))
+    assert not errors and parsed is not None
+    restored, errors = parse_json(export_json(parsed))
+    assert not errors and restored == parsed
+    config["slots"] = []
+    assert parse_json(encode(config))[0] is None
+
+
 def test_nlu_settings_survive_export_and_merge_preserves_current_settings():
     current = populated()
     current.nlu_settings.score = 0.72
