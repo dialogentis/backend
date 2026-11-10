@@ -29,6 +29,25 @@ def test_csv_import_produces_complete_candidate_and_reports_errors():
     assert candidate is None and report["errors"][0]["code"] == "unknown_intent"
 
 
+def test_csv_preview_rejects_existing_dangling_scenario_branch():
+    config = empty_config()
+    config["intents"] = [{"id": str(uuid4()), "code": "order", "name": "Заказ"}]
+    switch, end = config["flow"]["nodes"][1], config["flow"]["nodes"][3]
+    config["flow"]["edges"].append(
+        {
+            "id": str(uuid4()),
+            "source": switch["id"],
+            "source_handle": str(uuid4()),
+            "target": end["id"],
+        }
+    )
+    candidate, report = analyze_import(
+        csv_file([["Заказ 42", "order", "train", "[]"]]), "csv", "merge", config
+    )
+    assert candidate is None
+    assert any(item["code"] == "unknown_intent_output" for item in report["errors"])
+
+
 def test_json_import_reports_code_conflicts_without_echoing_file_fields():
     config = empty_config()
     config["intents"] = [{"id": str(uuid4()), "code": "order", "name": "Заказ"}]

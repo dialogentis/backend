@@ -107,6 +107,23 @@ def test_immediate_cycles_and_waiting_paths():
     assert "immediate_cycle" not in codes(validate_flow(config)[0])
 
 
+def test_switch_intent_outputs_check_the_referenced_intent():
+    config = empty_config()
+    switch, end = config["flow"]["nodes"][1], config["flow"]["nodes"][3]
+    intent_id = str(uuid4())
+    config["intents"] = [{"id": intent_id, "code": "order", "name": "Заказ", "enabled": False}]
+    config["flow"]["edges"].append(edge(switch, end, intent_id))
+    errors, warnings = validate_flow(config)
+    assert not errors and "disabled_intent_output" in codes(warnings)
+    config["intents"][0]["enabled"] = True
+    assert not validate_flow(config)[1]
+    config["intents"].clear()
+    errors, _ = validate_flow(config)
+    assert any(
+        item.code == "unknown_intent_output" and item.path[-1] == "source_handle" for item in errors
+    )
+
+
 def test_structural_check_handles_limits():
     config = empty_config()
     nodes = [node("start"), *[node("condition") for _ in range(299)]]

@@ -38,3 +38,43 @@ async def test_structural_validation_is_revision_bound_and_tenant_scoped(app):
         assert (
             await owner.post(base.replace(str(agent_id), str(uuid4())), json={"revision": 1})
         ).status_code == 404
+
+
+async def test_saved_intent_branch_cannot_dangle_after_direct_api_edit(app):
+    async with client_for(app) as owner:
+        _, org_id, agent_id = await create_agent(app, owner)
+        base = f"/api/v1/organizations/{org_id}/agents/{agent_id}"
+        draft = (await owner.get(f"{base}/draft")).json()
+        grant = (await owner.post(f"{base}/edit-lease", json={"tab_id": str(uuid4())})).json()
+        headers = {
+            "X-Edit-Lease": grant["lease_token"],
+            "X-Edit-Fence": str(grant["fencing_counter"]),
+            "If-Match": '"rev-1"',
+        }
+        config = draft["config"]
+        intent_id = str(uuid4())
+        config["intents"] = [{"id": intent_id, "code": "order", "name": "Заказ"}]
+        switch, end = config["flow"]["nodes"][1], config["flow"]["nodes"][3]
+        config["flow"]["edges"].append(
+            {
+                "id": str(uuid4()),
+                "source": switch["id"],
+                "source_handle": intent_id,
+                "target": end["id"],
+            }
+        )
+        body = {"schema_version": 1, "config": config}
+        saved = await owner.put(f"{base}/draft", headers=headers, json=body)
+        assert saved.status_code == 200, saved.text
+        assert (await owner.post(f"{base}/draft/flow/validate", json={"revision": 2})).json()[
+            "errors"
+        ] == []
+        config["intents"] = []
+        headers["If-Match"] = '"rev-2"'
+        rejected = await owner.put(f"{base}/draft", headers=headers, json=body)
+        assert rejected.status_code == 422
+        assert "unknown_intent_output" in {
+            item["code"] for item in rejected.json()["error"]["details"]
+        }
+        config["flow"]["edges"].pop()
+        assert (await owner.put(f"{base}/draft", headers=headers, json=body)).status_code == 200

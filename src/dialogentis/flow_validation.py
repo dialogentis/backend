@@ -5,8 +5,33 @@ from uuid import UUID
 
 from pydantic import ValidationError
 
+from dialogentis.datasets.schema import Intent
 from dialogentis.datasets.validation import Issue
 from dialogentis.flow_schema import Flow
+
+
+def validate_intent_outputs(flow: Flow, intents: list[Intent]) -> tuple[list[Issue], list[Issue]]:
+    intent_by_id = {str(intent.id): intent for intent in intents}
+    switches = {node.id for node in flow.nodes if node.type == "switch_intent"}
+    errors, warnings = [], []
+    for index, edge in enumerate(flow.edges):
+        if edge.source not in switches or edge.source_handle == "fallback":
+            continue
+        intent = intent_by_id.get(edge.source_handle)
+        path = ("flow", "edges", index, "source_handle")
+        if intent is None:
+            errors.append(
+                Issue(path, "unknown_intent_output", "Ветвь ссылается на отсутствующее намерение")
+            )
+        elif not intent.enabled:
+            warnings.append(
+                Issue(
+                    path,
+                    "disabled_intent_output",
+                    "Намерение ветви отключено и не будет распознано",
+                )
+            )
+    return errors, warnings
 
 
 def validate_flow(config: dict) -> tuple[list[Issue], list[Issue]]:
@@ -17,6 +42,17 @@ def validate_flow(config: dict) -> tuple[list[Issue], list[Issue]]:
 
     errors: list[Issue] = []
     warnings: list[Issue] = []
+    try:
+        intents = config.get("intents", [])
+        if not isinstance(intents, list):
+            raise ValueError("Invalid intents")
+        branch_errors, branch_warnings = validate_intent_outputs(
+            flow, [Intent.model_validate(item) for item in intents]
+        )
+        errors.extend(branch_errors)
+        warnings.extend(branch_warnings)
+    except ValidationError, ValueError:
+        errors.append(Issue(("intents",), "invalid_intents", "Проверьте данные намерений"))
     nodes = {}
     for index, node in enumerate(flow.nodes):
         if node.id in nodes:

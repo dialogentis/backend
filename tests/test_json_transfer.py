@@ -53,6 +53,27 @@ def test_json_round_trip_preserves_text_offsets_and_graph():
     assert example.text[example.spans[0].start : example.spans[0].end] == "123"
 
 
+def test_json_round_trip_preserves_intent_outputs_and_rejects_missing_intent():
+    config = populated()
+    switch = next(node for node in config.flow.nodes if node.type == "switch_intent")
+    end = next(node for node in config.flow.nodes if node.type == "end")
+    raw = config.model_dump(mode="json")
+    raw["flow"]["edges"].append(
+        {
+            "id": str(uuid4()),
+            "source": str(switch.id),
+            "source_handle": str(config.intents[0].id),
+            "target": str(end.id),
+        }
+    )
+    parsed, errors = parse_json(encode(raw))
+    assert not errors and parsed is not None
+    restored, errors = parse_json(export_json(parsed))
+    assert not errors and restored == parsed
+    raw["intents"] = []
+    assert parse_json(encode(raw))[0] is None
+
+
 def test_nlu_settings_survive_export_and_merge_preserves_current_settings():
     current = populated()
     current.nlu_settings.score = 0.72

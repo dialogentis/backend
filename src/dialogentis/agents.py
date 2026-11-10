@@ -247,7 +247,12 @@ def copy_config(config: dict) -> dict:
     ):
         raise HTTPException(409, "Нельзя скопировать сценарий с отсутствующими блоками")
     node_types = {node["id"]: node["type"] for node in flow["nodes"]}
-    outputs = {"start": {"next"}, "say": {"next"}, "switch_intent": {"fallback"}}
+    intent_ids = {str(intent.id) for intent in dataset.intents}
+    outputs = {
+        "start": {"next"},
+        "say": {"next"},
+        "switch_intent": {"fallback", *intent_ids},
+    }
     handles = [(edge["source"], edge["source_handle"]) for edge in flow["edges"]]
     if len(handles) != len(set(handles)) or any(
         edge["source_handle"] not in outputs.get(node_types[edge["source"]], set())
@@ -294,6 +299,8 @@ def copy_config(config: dict) -> dict:
             node["config"]["resume_node_id"] = mapping[node["config"]["resume_node_id"]]
     for edge in clone["flow"]["edges"]:
         edge["id"] = str(uuid4())
+        if node_types[edge["source"]] == "switch_intent" and edge["source_handle"] != "fallback":
+            edge["source_handle"] = data_mapping["intents"][UUID(edge["source_handle"])]
         edge["source"] = mapping[edge["source"]]
         edge["target"] = mapping[edge["target"]]
     return clone

@@ -72,6 +72,30 @@ def test_copy_remaps_dataset_references_without_replacing_literal_text():
     assert new_example["text"] == intent_id
 
 
+def test_copy_remaps_intent_branch_and_keeps_fallback():
+    config = empty_config()
+    intent_id = str(uuid4())
+    config["intents"] = [{"id": intent_id, "code": "order", "name": "Заказ"}]
+    switch, end = config["flow"]["nodes"][1], config["flow"]["nodes"][3]
+    config["flow"]["edges"].append(
+        {
+            "id": str(uuid4()),
+            "source": switch["id"],
+            "source_handle": intent_id,
+            "target": end["id"],
+        }
+    )
+    clone = copy_config(config)
+    cloned_switch = next(node for node in clone["flow"]["nodes"] if node["type"] == "switch_intent")
+    outputs = {
+        edge["source_handle"]
+        for edge in clone["flow"]["edges"]
+        if edge["source"] == cloned_switch["id"]
+    }
+    assert outputs == {"fallback", clone["intents"][0]["id"]}
+    assert intent_id not in outputs
+
+
 def test_copy_rejects_unknown_dataset_references():
     config = empty_config()
     config["examples"] = [

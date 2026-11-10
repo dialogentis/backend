@@ -15,6 +15,7 @@ from dialogentis.config import get_settings
 from dialogentis.datasets.csv_import import MAX_FILE_BYTES, parse_csv, preview_csv
 from dialogentis.datasets.import_models import ImportTask
 from dialogentis.datasets.json_transfer import PortableConfig, parse_json, preview_json
+from dialogentis.datasets.routes import validate_configuration
 from dialogentis.datasets.schema import Dataset
 from dialogentis.db import unit_of_work
 from dialogentis.jobs.lifecycle import Apply, Claim, PermanentJobError, RetryableJobError
@@ -80,6 +81,20 @@ def analyze_import(
             candidate = (
                 preview.config.model_dump(mode="json") if preview.config is not None else None
             )
+        if candidate is not None:
+            branch_errors, _ = validate_configuration(candidate)
+            invalid_branches = [
+                item for item in branch_errors if item.code == "unknown_intent_output"
+            ]
+            if invalid_branches:
+                report["errors"] = [
+                    *report["errors"],
+                    *(
+                        {"row": None, "field": "file", "path": list(item.path), "code": item.code}
+                        for item in invalid_branches[:1000]
+                    ),
+                ]
+                candidate = None
         if (
             candidate is not None
             and len(json.dumps(candidate, ensure_ascii=False, allow_nan=False).encode())

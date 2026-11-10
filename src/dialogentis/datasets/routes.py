@@ -13,6 +13,8 @@ from dialogentis.datasets.preview import Preview, run_preview
 from dialogentis.datasets.schema import Dataset, validate_dataset
 from dialogentis.datasets.validation import Issue
 from dialogentis.dependencies import Database
+from dialogentis.flow_schema import Flow
+from dialogentis.flow_validation import validate_intent_outputs
 from dialogentis.organizations import organization_context
 
 router = APIRouter(prefix="/api/v1/organizations/{org_id}/agents/{agent_id}", tags=["datasets"])
@@ -96,7 +98,13 @@ def validate_configuration(config: dict) -> tuple[list[Issue], list[Issue]]:
             Issue(safe_path(error["loc"]), error["type"], "Некорректное значение")
             for error in exc.errors(include_input=False, include_context=False, include_url=False)
         ], []
-    return validate_dataset(dataset)
+    errors, warnings = validate_dataset(dataset)
+    try:
+        flow = Flow.model_validate(config.get("flow"))
+    except ValidationError:
+        return errors, warnings
+    branch_errors, branch_warnings = validate_intent_outputs(flow, dataset.intents)
+    return [*errors, *branch_errors], [*warnings, *branch_warnings]
 
 
 def issue_view(issue: Issue) -> ValidationIssue:

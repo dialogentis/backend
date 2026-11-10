@@ -50,7 +50,11 @@ class PortableConfig(InputModel):
             raise ValueError("Duplicate node")
         edge_ids: set[UUID] = set()
         handles: set[tuple[UUID, str]] = set()
-        outputs = {"start": {"next"}, "say": {"next"}, "switch_intent": {"fallback"}}
+        outputs = {
+            "start": {"next"},
+            "say": {"next"},
+            "switch_intent": {"fallback", *(str(intent.id) for intent in self.intents)},
+        }
         for node in self.flow.nodes:
             if node.type not in allowed or set(node.config) - allowed[node.type]:
                 raise ValueError("Unsupported node configuration")
