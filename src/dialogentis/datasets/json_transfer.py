@@ -10,13 +10,14 @@ from dialogentis.datasets.csv_import import MAX_ERRORS, MAX_FILE_BYTES, unique_o
 from dialogentis.datasets.schema import Dataset, Entity, Example, Intent, validate_dataset
 from dialogentis.flow_schema import Flow
 from dialogentis.nlu.settings import NLUSettings, QualitySettings
+from dialogentis.slots import Slot, validate_slots
 
 
 class PortableConfig(InputModel):
     intents: list[Intent] = Field(max_length=100)
     entities: list[Entity]
     examples: list[Example] = Field(max_length=13000)
-    slots: list[object] = Field(max_length=0)
+    slots: list[Slot]
     flow: Flow
     nlu_settings: NLUSettings = Field(default_factory=NLUSettings)
     quality_settings: QualitySettings = Field(default_factory=QualitySettings)
@@ -36,6 +37,9 @@ class PortableConfig(InputModel):
 
     @model_validator(mode="after")
     def check_flow(self):
+        _, slot_errors = validate_slots([slot.model_dump(mode="json") for slot in self.slots])
+        if slot_errors:
+            raise ValueError("Duplicate or invalid slots")
         allowed = {
             "start": set(),
             "switch_intent": set(),
@@ -131,6 +135,9 @@ def _safe_path(path: tuple) -> tuple[str | int, ...]:
         "description",
         "enabled",
         "value_type",
+        "required",
+        "sensitive",
+        "default",
         "method",
         "dictionary",
         "value",

@@ -1,6 +1,7 @@
 import csv
 import io
 import json
+from copy import deepcopy
 from uuid import uuid4
 
 from dialogentis.agents import empty_config
@@ -63,6 +64,18 @@ def test_json_import_reports_code_conflicts_without_echoing_file_fields():
     assert (
         candidate is None and "PRIVATE_SECRET" not in repr(report) and "hidden" not in repr(report)
     )
+
+
+def test_json_replace_cannot_remove_slot_still_referenced_by_imported_flow():
+    config = empty_config()
+    config["slots"] = [{"id": str(uuid4()), "code": "city"}]
+    config["flow"]["nodes"][2]["config"]["text"] = "Город: {{city}}"
+    imported = deepcopy(config)
+    imported["slots"] = []
+    content = json.dumps({"schema_version": 1, "config": imported}).encode()
+    candidate, report = analyze_import(content, "json", "replace", config)
+    assert candidate is None
+    assert any(item["code"] == "slot_in_use" for item in report["errors"])
 
 
 def test_json_import_marks_truncated_code_lists():

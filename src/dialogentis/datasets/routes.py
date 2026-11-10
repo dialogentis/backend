@@ -16,6 +16,7 @@ from dialogentis.dependencies import Database
 from dialogentis.flow_schema import Flow
 from dialogentis.flow_validation import validate_intent_outputs
 from dialogentis.organizations import organization_context
+from dialogentis.slots import validate_slots
 
 router = APIRouter(prefix="/api/v1/organizations/{org_id}/agents/{agent_id}", tags=["datasets"])
 DATASET_FIELDS = frozenset(
@@ -99,6 +100,8 @@ def validate_configuration(config: dict) -> tuple[list[Issue], list[Issue]]:
             for error in exc.errors(include_input=False, include_context=False, include_url=False)
         ], []
     errors, warnings = validate_dataset(dataset)
+    _, slot_errors = validate_slots(config.get("slots", []))
+    errors.extend(slot_errors)
     try:
         flow = Flow.model_validate(config.get("flow"))
     except ValidationError:

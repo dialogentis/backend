@@ -29,6 +29,7 @@ from dialogentis.drafts import (
 from dialogentis.jobs.enqueue import enqueue
 from dialogentis.jobs.models import Job
 from dialogentis.organizations import audit, organization_context
+from dialogentis.slots import removed_slot_references
 
 router = APIRouter(prefix="/api/v1/organizations/{org_id}/agents/{agent_id}", tags=["imports"])
 JobStatus = Literal["queued", "running", "succeeded", "failed", "cancelled"]
@@ -224,6 +225,7 @@ async def apply_import(
     if size > MAX_FILE_BYTES:
         raise HTTPException(413, "Черновик превышает 10 МиБ")
     errors, _ = await asyncio.to_thread(validate_configuration, config)
+    errors.extend(removed_slot_references(draft.configuration, config))
     readiness = {
         "insufficient_intents",
         "insufficient_intent_examples",

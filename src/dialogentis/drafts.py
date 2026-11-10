@@ -19,6 +19,7 @@ from dialogentis.flow_schema import Flow
 from dialogentis.models import AgentDraft, User
 from dialogentis.nlu.settings import NLUSettings, QualitySettings
 from dialogentis.organizations import audit, organization_context
+from dialogentis.slots import removed_slot_references
 
 router = APIRouter(prefix="/api/v1/organizations/{org_id}/agents/{agent_id}", tags=["drafts"])
 LeaseToken = Annotated[str, Header(alias="X-Edit-Lease", min_length=32, max_length=128)]
@@ -199,6 +200,7 @@ async def save_draft(
     if size > 10 * 1024 * 1024:
         raise HTTPException(413, "Черновик превышает 10 МиБ")
     errors, _ = await asyncio.to_thread(validate_configuration, config)
+    errors.extend(removed_slot_references(draft.configuration, config))
     readiness_only = {
         "insufficient_intents",
         "insufficient_intent_examples",

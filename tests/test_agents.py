@@ -149,7 +149,7 @@ async def test_agent_metadata_roles_isolation_and_optimistic_concurrency(app):
             assert draft is not None
             draft.configuration = {
                 **draft.configuration,
-                "slots": [{"id": str(uuid4()), "code": "city"}],
+                "slots": [{"id": str(uuid4()), "code": "city", "unsupported": "value"}],
             }
         assert (
             await owner.post(f"{base}/{agent_id}/copy", json={"name": "Unsafe", "slug": "unsafe"})

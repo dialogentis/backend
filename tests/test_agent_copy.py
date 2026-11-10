@@ -96,6 +96,17 @@ def test_copy_remaps_intent_branch_and_keeps_fallback():
     assert intent_id not in outputs
 
 
+def test_copy_remaps_slots_without_changing_codes_or_default_values():
+    config = empty_config()
+    slot_id = str(uuid4())
+    config["slots"] = [{"id": slot_id, "code": "city", "default": slot_id, "sensitive": True}]
+    config["flow"]["nodes"][2]["config"]["text"] = "Город: {{city}}"
+    clone = copy_config(config)
+    assert clone["slots"][0]["id"] != slot_id
+    assert clone["slots"][0]["default"] == slot_id and clone["slots"][0]["sensitive"] is True
+    assert clone["flow"]["nodes"][2]["config"]["text"] == "Город: {{city}}"
+
+
 def test_copy_rejects_unknown_dataset_references():
     config = empty_config()
     config["examples"] = [

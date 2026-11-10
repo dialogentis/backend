@@ -214,6 +214,7 @@ def copy_config(config: dict) -> dict:
     """Copy only configurations whose internal references are understood."""
     from dialogentis.datasets.schema import Dataset
     from dialogentis.drafts import DraftConfig
+    from dialogentis.slots import validate_slots
 
     try:
         result = DraftConfig.model_validate(config).model_dump(mode="json")
@@ -223,6 +224,9 @@ def copy_config(config: dict) -> dict:
     except ValidationError as exc:
         raise HTTPException(409, "Нельзя скопировать некорректный черновик") from exc
     flow = result["flow"]
+    slots, slot_errors = validate_slots(result["slots"])
+    if slot_errors:
+        raise HTTPException(409, "Нельзя скопировать некорректные параметры")
     allowed = {
         "start": set(),
         "switch_intent": set(),
@@ -230,7 +234,7 @@ def copy_config(config: dict) -> dict:
         "say": {"text"},
         "end": {"text"},
     }
-    if result["slots"] or flow["layout"]:
+    if flow["layout"]:
         raise HTTPException(409, "Копирование этого черновика пока недоступно")
     if any(
         node["type"] not in allowed or set(node["config"]) - allowed[node["type"]]
@@ -271,6 +275,7 @@ def copy_config(config: dict) -> dict:
         "intents": [item.id for item in dataset.intents],
         "entities": [item.id for item in dataset.entities],
         "examples": [item.id for item in dataset.examples],
+        "slots": [item.id for item in slots],
     }
     if any(len(ids) != len(set(ids)) for ids in identifiers.values()):
         raise HTTPException(409, "Нельзя скопировать данные с повторяющимися идентификаторами")
@@ -292,6 +297,8 @@ def copy_config(config: dict) -> dict:
                     item["intent_id"] = data_mapping["intents"][UUID(item["intent_id"])]
                 for span in item.get("spans", []):
                     span["entity_id"] = data_mapping["entities"][UUID(span["entity_id"])]
+    for item in clone["slots"]:
+        item["id"] = data_mapping["slots"][UUID(item["id"])]
     clone["flow"]["flow_id"] = str(uuid4())
     for node in clone["flow"]["nodes"]:
         node["id"] = mapping[node["id"]]

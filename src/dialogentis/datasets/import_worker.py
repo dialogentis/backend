@@ -20,6 +20,7 @@ from dialogentis.datasets.schema import Dataset
 from dialogentis.db import unit_of_work
 from dialogentis.jobs.lifecycle import Apply, Claim, PermanentJobError, RetryableJobError
 from dialogentis.jobs.models import Job
+from dialogentis.slots import removed_slot_references
 
 
 def analyze_import(
@@ -82,16 +83,26 @@ def analyze_import(
                 preview.config.model_dump(mode="json") if preview.config is not None else None
             )
         if candidate is not None:
-            branch_errors, _ = validate_configuration(candidate)
-            invalid_branches = [
-                item for item in branch_errors if item.code == "unknown_intent_output"
+            config_errors, _ = validate_configuration(candidate)
+            invalid_references = [
+                item
+                for item in config_errors
+                if item.code
+                in {
+                    "unknown_intent_output",
+                    "invalid_slots",
+                    "invalid_slot",
+                    "duplicate_slot_id",
+                    "duplicate_slot_code",
+                }
             ]
-            if invalid_branches:
+            invalid_references.extend(removed_slot_references(config, candidate))
+            if invalid_references:
                 report["errors"] = [
                     *report["errors"],
                     *(
                         {"row": None, "field": "file", "path": list(item.path), "code": item.code}
-                        for item in invalid_branches[:1000]
+                        for item in invalid_references[:1000]
                     ),
                 ]
                 candidate = None

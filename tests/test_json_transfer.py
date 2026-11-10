@@ -74,6 +74,32 @@ def test_json_round_trip_preserves_intent_outputs_and_rejects_missing_intent():
     assert parse_json(encode(raw))[0] is None
 
 
+def test_json_round_trip_preserves_typed_slots():
+    config = populated().model_dump(mode="json")
+    config["slots"] = [
+        {
+            "id": str(uuid4()),
+            "code": "amount",
+            "value_type": "number",
+            "default": "100.25",
+            "required": True,
+            "sensitive": False,
+        },
+        {
+            "id": str(uuid4()),
+            "code": "consent",
+            "value_type": "boolean",
+            "default": False,
+            "sensitive": True,
+        },
+    ]
+    parsed, errors = parse_json(encode(config))
+    assert not errors and parsed is not None
+    restored, errors = parse_json(export_json(parsed))
+    assert not errors and restored == parsed
+    assert restored.slots[0].default == "100.25"
+
+
 def test_nlu_settings_survive_export_and_merge_preserves_current_settings():
     current = populated()
     current.nlu_settings.score = 0.72
