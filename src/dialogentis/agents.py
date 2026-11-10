@@ -109,7 +109,10 @@ def empty_config() -> dict:
                 {
                     "id": fallback,
                     "type": "fallback",
-                    "config": {"resume_node_id": switch},
+                    "config": {
+                        "resume_node_id": switch,
+                        "text": "Не удалось распознать запрос. Попробуйте переформулировать.",
+                    },
                     "position": {"x": 500, "y": 0},
                 },
                 {"id": end, "type": "end", "config": {}, "position": {"x": 500, "y": 200}},

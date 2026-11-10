@@ -8,6 +8,8 @@ from pydantic import ValidationError
 from dialogentis.datasets.schema import Intent
 from dialogentis.datasets.validation import Issue
 from dialogentis.flow_schema import Flow
+from dialogentis.slots import validate_slots
+from dialogentis.templates import TemplateError, parse_template
 
 
 def validate_intent_outputs(flow: Flow, intents: list[Intent]) -> tuple[list[Issue], list[Issue]]:
@@ -42,6 +44,8 @@ def validate_flow(config: dict) -> tuple[list[Issue], list[Issue]]:
 
     errors: list[Issue] = []
     warnings: list[Issue] = []
+    slots, slot_errors = validate_slots(config.get("slots", []))
+    errors.extend(slot_errors)
     try:
         intents = config.get("intents", [])
         if not isinstance(intents, list):
@@ -140,6 +144,31 @@ def validate_flow(config: dict) -> tuple[list[Issue], list[Issue]]:
 
     for index, node in enumerate(flow.nodes):
         path = ("flow", "nodes", index)
+        if node.type in {"say", "fallback", "end"}:
+            text = node.config.get("text")
+            if node.type != "end" and (not isinstance(text, str) or not text.strip()):
+                errors.append(
+                    Issue((*path, "config", "text"), "missing_text", "Укажите текст ответа")
+                )
+            elif text is not None:
+                if not isinstance(text, str):
+                    errors.append(
+                        Issue(
+                            (*path, "config", "text"),
+                            "invalid_text",
+                            "Текст ответа должен быть строкой",
+                        )
+                    )
+                elif not slot_errors:
+                    try:
+                        parse_template(text, slots)
+                    except TemplateError as exc:
+                        message = {
+                            "template_too_long": "Текст ответа превышает 4000 символов",
+                            "html_not_allowed": "HTML в тексте ответа не поддерживается",
+                            "unknown_template_slot": "В тексте указан несуществующий параметр",
+                        }.get(exc.code, "Проверьте шаблон текста ответа")
+                        errors.append(Issue((*path, "config", "text"), exc.code, message))
         required = {"start": ("next",), "say": ("next",), "switch_intent": ("fallback",)}
         for handle in required.get(node.type, ()):
             if (node.id, handle) not in handles:

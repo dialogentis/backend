@@ -78,3 +78,27 @@ async def test_saved_intent_branch_cannot_dangle_after_direct_api_edit(app):
         }
         config["flow"]["edges"].pop()
         assert (await owner.put(f"{base}/draft", headers=headers, json=body)).status_code == 200
+
+
+async def test_flow_validation_checks_saved_template_and_slot_references(app):
+    async with client_for(app) as owner:
+        _, org_id, agent_id = await create_agent(app, owner)
+        base = f"/api/v1/organizations/{org_id}/agents/{agent_id}"
+        draft = (await owner.get(f"{base}/draft")).json()
+        grant = (await owner.post(f"{base}/edit-lease", json={"tab_id": str(uuid4())})).json()
+        headers = {
+            "X-Edit-Lease": grant["lease_token"],
+            "X-Edit-Fence": str(grant["fencing_counter"]),
+            "If-Match": '"rev-1"',
+        }
+        config = draft["config"]
+        config["flow"]["nodes"][2]["config"]["text"] = "Город: {{city}}"
+        body = {"schema_version": 1, "config": config}
+        assert (await owner.put(f"{base}/draft", headers=headers, json=body)).status_code == 200
+        validation = await owner.post(f"{base}/draft/flow/validate", json={"revision": 2})
+        assert "unknown_template_slot" in {item["code"] for item in validation.json()["errors"]}
+        config["slots"] = [{"id": str(uuid4()), "code": "city"}]
+        headers["If-Match"] = '"rev-2"'
+        assert (await owner.put(f"{base}/draft", headers=headers, json=body)).status_code == 200
+        validation = await owner.post(f"{base}/draft/flow/validate", json={"revision": 3})
+        assert validation.json()["errors"] == []
