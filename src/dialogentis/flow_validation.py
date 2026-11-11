@@ -9,6 +9,7 @@ from dialogentis.ask_slot import AskSlotConfig, check_ask_config
 from dialogentis.datasets.schema import Entity, Intent
 from dialogentis.datasets.validation import Issue
 from dialogentis.flow_schema import Flow
+from dialogentis.set_slot import SetSlotConfig, check_set_config
 from dialogentis.slots import validate_slots
 from dialogentis.templates import TemplateError, parse_template
 
@@ -146,6 +147,7 @@ def validate_flow(config: dict) -> tuple[list[Issue], list[Issue]]:
             "return": set(),
             "fallback": set(),
             "ask_slot": {"success", "invalid", "exhausted"},
+            "set_slot": {"next", "error"},
         }
         if source_node.type in allowed and edge.source_handle not in allowed[source_node.type]:
             errors.append(
@@ -189,11 +191,23 @@ def validate_flow(config: dict) -> tuple[list[Issue], list[Issue]]:
             "say": ("next",),
             "switch_intent": ("fallback",),
             "ask_slot": ("success", "invalid", "exhausted"),
+            "set_slot": ("next", "error"),
         }
         for handle in required.get(node.type, ()):
             if (node.id, handle) not in handles:
                 errors.append(
                     Issue(path, "missing_output", "Не подключён обязательный выход блока")
+                )
+        if node.type == "set_slot":
+            try:
+                check_set_config(SetSlotConfig.model_validate(node.config), slot_by_id)
+            except ValidationError, ValueError:
+                errors.append(
+                    Issue(
+                        (*path, "config"),
+                        "invalid_set_slot",
+                        "Проверьте параметр и значение присваивания",
+                    )
                 )
         if node.type == "ask_slot":
             try:

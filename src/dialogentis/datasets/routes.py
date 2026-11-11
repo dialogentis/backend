@@ -17,6 +17,7 @@ from dialogentis.dependencies import Database
 from dialogentis.flow_schema import Flow
 from dialogentis.flow_validation import validate_intent_outputs
 from dialogentis.organizations import organization_context
+from dialogentis.set_slot import validate_set_references
 from dialogentis.slots import validate_slots
 
 router = APIRouter(prefix="/api/v1/organizations/{org_id}/agents/{agent_id}", tags=["datasets"])
@@ -108,7 +109,12 @@ def validate_configuration(config: dict) -> tuple[list[Issue], list[Issue]]:
     except ValidationError:
         return errors, warnings
     branch_errors, branch_warnings = validate_intent_outputs(flow, dataset.intents)
-    return [*errors, *branch_errors, *validate_ask_references(flow, slots, dataset.entities)], [
+    return [
+        *errors,
+        *branch_errors,
+        *validate_ask_references(flow, slots, dataset.entities),
+        *validate_set_references(flow, slots),
+    ], [
         *warnings,
         *branch_warnings,
     ]

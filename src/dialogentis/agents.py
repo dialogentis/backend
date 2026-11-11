@@ -218,6 +218,7 @@ def copy_config(config: dict) -> dict:
     from dialogentis.ask_slot import AskSlotDraftConfig
     from dialogentis.datasets.schema import Dataset
     from dialogentis.drafts import DraftConfig
+    from dialogentis.set_slot import SetSlotDraftConfig
     from dialogentis.slots import validate_slots
 
     try:
@@ -238,6 +239,7 @@ def copy_config(config: dict) -> dict:
         "say": {"text"},
         "end": {"text"},
         "ask_slot": {"slot_id", "prompt", "entity_id", "max_attempts", "checks"},
+        "set_slot": {"slot_id", "operation", "source", "source_slot_id", "value"},
     }
     if flow["layout"]:
         raise HTTPException(409, "Копирование этого черновика пока недоступно")
@@ -262,6 +264,7 @@ def copy_config(config: dict) -> dict:
         "say": {"next"},
         "switch_intent": {"fallback", *intent_ids},
         "ask_slot": {"success", "invalid", "exhausted"},
+        "set_slot": {"next", "error"},
     }
     handles = [(edge["source"], edge["source_handle"]) for edge in flow["edges"]]
     if len(handles) != len(set(handles)) or any(
@@ -276,6 +279,16 @@ def copy_config(config: dict) -> dict:
             not isinstance(node["config"]["example"], str) or len(node["config"]["example"]) > 500
         ):
             raise HTTPException(409, "Нельзя скопировать некорректный пример запроса")
+        if node["type"] == "set_slot":
+            try:
+                assignment = SetSlotDraftConfig.model_validate(node["config"])
+            except ValidationError:
+                raise HTTPException(409, "Нельзя скопировать некорректный блок параметра") from None
+            if any(
+                ref is not None and ref not in {slot.id for slot in slots}
+                for ref in (assignment.slot_id, assignment.source_slot_id)
+            ):
+                raise HTTPException(409, "Нельзя скопировать сценарий с отсутствующим параметром")
         if node["type"] == "ask_slot":
             try:
                 ask = AskSlotDraftConfig.model_validate(node["config"])
@@ -325,6 +338,11 @@ def copy_config(config: dict) -> dict:
         node["id"] = mapping[node["id"]]
         if "resume_node_id" in node["config"]:
             node["config"]["resume_node_id"] = mapping[node["config"]["resume_node_id"]]
+        if node["type"] == "set_slot":
+            for key in ("slot_id", "source_slot_id"):
+                reference = node["config"].get(key)
+                if reference is not None:
+                    node["config"][key] = data_mapping["slots"][UUID(reference)]
         if node["type"] == "ask_slot":
             for key, collection in (("slot_id", "slots"), ("entity_id", "entities")):
                 reference = node["config"].get(key)

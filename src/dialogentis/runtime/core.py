@@ -16,6 +16,7 @@ from dialogentis.datasets.validation import normalize_example
 from dialogentis.flow_schema import Flow, FlowNode
 from dialogentis.flow_validation import validate_flow
 from dialogentis.runtime.slot_values import SlotValueError, parse_slot_value, valid_value
+from dialogentis.set_slot import SetSlotConfig
 from dialogentis.slots import Slot, validate_slots
 from dialogentis.templates import TemplateError, render_template
 
@@ -145,6 +146,11 @@ class RuntimeEngine:
             node.id: AskSlotConfig.model_validate(node.config)
             for node in self._flow.nodes
             if node.type == "ask_slot"
+        }
+        self._sets = {
+            node.id: SetSlotConfig.model_validate(node.config)
+            for node in self._flow.nodes
+            if node.type == "set_slot"
         }
         self._start = next(node.id for node in self._flow.nodes if node.type == "start")
         try:
@@ -381,6 +387,25 @@ class RuntimeEngine:
                     text = None
                     last_prediction = prediction
                     node_id = move(node, handle)
+                elif node.type == "set_slot":
+                    assignment = self._sets[node.id]
+                    slot = self._slot_by_id[assignment.slot_id]
+                    if assignment.operation == "clear":
+                        values[slot.code] = None
+                        node_id = move(node, "next")
+                    else:
+                        source = self._slot_by_id.get(assignment.source_slot_id)
+                        value = (
+                            values.get(source.code)
+                            if assignment.source == "slot" and source
+                            else assignment.value
+                        )
+                        if value is None:
+                            node_id = move(node, "error")
+                        else:
+                            values[slot.code] = value
+                            trace.append(TraceEvent(node.id, node.type, "slot_set", str(slot.id)))
+                            node_id = move(node, "next")
                 elif node.type == "ask_slot":
                     ask = self._asks[node.id]
                     slot = self._slot_by_id[ask.slot_id]

@@ -11,6 +11,7 @@ from dialogentis.datasets.csv_import import MAX_ERRORS, MAX_FILE_BYTES, unique_o
 from dialogentis.datasets.schema import Dataset, Entity, Example, Intent, validate_dataset
 from dialogentis.flow_schema import Flow
 from dialogentis.nlu.settings import NLUSettings, QualitySettings
+from dialogentis.set_slot import SetSlotDraftConfig
 from dialogentis.slots import Slot, validate_slots
 
 
@@ -48,6 +49,7 @@ class PortableConfig(InputModel):
             "say": {"text"},
             "end": {"text"},
             "ask_slot": {"slot_id", "prompt", "entity_id", "max_attempts", "checks"},
+            "set_slot": {"slot_id", "operation", "source", "source_slot_id", "value"},
         }
         if self.flow.layout:
             raise ValueError("Unsupported layout")
@@ -61,6 +63,7 @@ class PortableConfig(InputModel):
             "say": {"next"},
             "switch_intent": {"fallback", *(str(intent.id) for intent in self.intents)},
             "ask_slot": {"success", "invalid", "exhausted"},
+            "set_slot": {"next", "error"},
         }
         for node in self.flow.nodes:
             if node.type not in allowed or set(node.config) - allowed[node.type]:
@@ -73,6 +76,13 @@ class PortableConfig(InputModel):
                 not isinstance(node.config["example"], str) or len(node.config["example"]) > 500
             ):
                 raise ValueError("Invalid fallback example")
+            if node.type == "set_slot":
+                assignment = SetSlotDraftConfig.model_validate(node.config)
+                if any(
+                    ref is not None and ref not in {slot.id for slot in self.slots}
+                    for ref in (assignment.slot_id, assignment.source_slot_id)
+                ):
+                    raise ValueError("Unknown slot")
             if node.type == "ask_slot":
                 ask = AskSlotDraftConfig.model_validate(node.config)
                 if ask.slot_id is not None and ask.slot_id not in {slot.id for slot in self.slots}:
