@@ -33,3 +33,40 @@ async def cleanup_expired_conversations(db: AsyncSession, organization_id: UUID)
         .returning(TestConversation.id)
     )
     return len(deleted.all())
+
+
+async def recover_abandoned_turns(db: AsyncSession, organization_id: UUID) -> int:
+    """Fail expired reservations without replaying a possibly executed turn."""
+    from sqlalchemy import update
+
+    ids = (
+        await db.scalars(
+            select(TestConversation.id)
+            .where(
+                TestConversation.organization_id == organization_id,
+                TestConversation.processing_token.is_not(None),
+                TestConversation.processing_expires_at <= func.now(),
+            )
+            .order_by(TestConversation.processing_expires_at, TestConversation.id)
+            .limit(100)
+            .with_for_update(skip_locked=True)
+        )
+    ).all()
+    if not ids:
+        return 0
+    updated = await db.scalars(
+        update(TestConversation)
+        .where(
+            TestConversation.organization_id == organization_id,
+            TestConversation.id.in_(ids),
+            TestConversation.processing_expires_at <= func.now(),
+        )
+        .values(
+            checkpoint=None,
+            processing_token=None,
+            processing_expires_at=None,
+            revision=TestConversation.revision + 1,
+        )
+        .returning(TestConversation.id)
+    )
+    return len(updated.all())

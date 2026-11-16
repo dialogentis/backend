@@ -27,6 +27,8 @@ class TestConversation(Base):
     created_by: Mapped[UUID] = mapped_column(ForeignKey("users.id"))
     checkpoint: Mapped[bytes | None] = mapped_column(LargeBinary)
     revision: Mapped[int] = mapped_column(default=1)
+    processing_token: Mapped[UUID | None] = mapped_column()
+    processing_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     idle_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     absolute_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
@@ -38,6 +40,12 @@ class TestConversation(Base):
             ondelete="CASCADE",
         ),
         CheckConstraint("revision > 0"),
+        CheckConstraint(
+            "(processing_token IS NULL AND processing_expires_at IS NULL) OR "
+            "(processing_token IS NOT NULL AND processing_expires_at IS NOT NULL "
+            "AND checkpoint IS NOT NULL)",
+            name="ck_test_conversations_processing",
+        ),
         CheckConstraint(
             "idle_expires_at <= absolute_expires_at AND "
             "absolute_expires_at <= created_at + interval '24 hours'"

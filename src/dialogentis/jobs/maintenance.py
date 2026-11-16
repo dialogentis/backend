@@ -18,7 +18,7 @@ from dialogentis.jobs.broker import create_broker
 from dialogentis.jobs.dispatcher import dispatcher_factory
 from dialogentis.jobs.lifecycle import recover_tenant
 from dialogentis.jobs.models import MaintenanceRun, OutboxEvent
-from dialogentis.runtime.cleanup import cleanup_expired_conversations
+from dialogentis.runtime.cleanup import cleanup_expired_conversations, recover_abandoned_turns
 from dialogentis.runtime.models import TestConversation
 
 broker = create_broker("dialogentis.maintenance")
@@ -50,6 +50,11 @@ async def reconcile_once(
                 await scrub_exports(db, organization_id)
                 await scrub_imports(db, organization_id)
         for organization_id in conversation_organizations:
+            for _ in range(10):
+                async with unit_of_work(factory, organization_id=organization_id) as db:
+                    recovered = await recover_abandoned_turns(db, organization_id)
+                if recovered < 100:
+                    break
             for _ in range(10):
                 async with unit_of_work(factory, organization_id=organization_id) as db:
                     removed = await cleanup_expired_conversations(db, organization_id)

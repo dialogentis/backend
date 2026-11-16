@@ -132,10 +132,50 @@ async def _locked_row(
     return row, now
 
 
+@dataclass(frozen=True)
+class TurnReservation:
+    id: UUID
+    revision: int
+    token: UUID = field(repr=False)
+    state: RuntimeState = field(repr=False)
+
+
+async def reserve_turn(
+    db: AsyncSession,
+    user: User,
+    organization_id: UUID,
+    conversation_id: UUID,
+    expected_revision: int,
+    settings: Settings,
+) -> TurnReservation:
+    if type(expected_revision) is not int or expected_revision < 1:
+        raise ValueError("Invalid revision")
+    row, now = await _locked_row(db, user, organization_id, conversation_id)
+    if row.processing_token is not None:
+        raise HTTPException(
+            409, "Ход уже обрабатывается или требует восстановления", headers={"Retry-After": "1"}
+        )
+    if row.revision != expected_revision:
+        raise HTTPException(409, "Диалог изменился. Обновите состояние")
+    assert row.checkpoint is not None
+    state = decrypt_checkpoint(row.checkpoint, _identity(row), settings)
+    token = uuid4()
+    row.processing_token = token
+    row.processing_expires_at = min(
+        now + timedelta(seconds=30), row.absolute_expires_at, row.idle_expires_at
+    )
+    await db.flush()
+    return TurnReservation(row.id, row.revision, token, state)
+
+
 async def read_conversation(
     db: AsyncSession, user: User, organization_id: UUID, conversation_id: UUID, settings: Settings
 ) -> ConversationSnapshot:
     row, _ = await _locked_row(db, user, organization_id, conversation_id)
+    if row.processing_token is not None:
+        raise HTTPException(
+            409, "Ход уже обрабатывается или требует восстановления", headers={"Retry-After": "1"}
+        )
     assert row.checkpoint is not None
     state = decrypt_checkpoint(row.checkpoint, _identity(row), settings)
     return ConversationSnapshot(row.id, row.revision, state)
@@ -147,6 +187,7 @@ async def commit_turn(
     organization_id: UUID,
     conversation_id: UUID,
     expected_revision: int,
+    token: UUID,
     state: RuntimeState,
     settings: Settings,
 ) -> ConversationSnapshot:
@@ -156,6 +197,12 @@ async def commit_turn(
     row, now = await _locked_row(db, user, organization_id, conversation_id)
     if row.revision != expected_revision:
         raise HTTPException(409, "Диалог изменился. Обновите состояние")
+    if (
+        row.processing_token != token
+        or row.processing_expires_at is None
+        or row.processing_expires_at <= now
+    ):
+        raise HTTPException(409, "Резервирование хода недействительно")
     assert row.checkpoint is not None
     previous = decrypt_checkpoint(row.checkpoint, _identity(row), settings)
     if (
@@ -169,6 +216,8 @@ async def commit_turn(
         if state.status == "waiting_input"
         else None
     )
+    row.processing_token = None
+    row.processing_expires_at = None
     row.revision += 1
     row.idle_expires_at = min(now + timedelta(minutes=30), row.absolute_expires_at)
     await db.flush()

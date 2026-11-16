@@ -15,7 +15,12 @@ from dialogentis.config import Settings
 from dialogentis.db import unit_of_work
 from dialogentis.jobs.models import Job
 from dialogentis.models import Membership, User
-from dialogentis.runtime.conversations import commit_turn, create_conversation, read_conversation
+from dialogentis.runtime.conversations import (
+    commit_turn,
+    create_conversation,
+    read_conversation,
+    reserve_turn,
+)
 from dialogentis.runtime.core import RuntimeState
 from dialogentis.runtime.models import TestConversation as ConversationRecord
 from dialogentis.versions.models import AgentVersion
@@ -116,23 +121,47 @@ async def test_conversation_lifecycle_concurrency_expiry_and_permissions(app):
             ).state == initial
         next_state = initial.model_copy(update={"turn": 1})
 
-        async def update():
+        async def reserve():
             async with unit_of_work(
                 app.state.session_factory, organization_id=org_id, user_id=user_id
             ) as db:
-                return await commit_turn(
-                    db, await user(db, user_id), org_id, conversation_id, 1, next_state, settings
+                return await reserve_turn(
+                    db, await user(db, user_id), org_id, conversation_id, 1, settings
                 )
 
-        outcomes = await asyncio.gather(update(), update(), return_exceptions=True)
+        outcomes = await asyncio.gather(reserve(), reserve(), return_exceptions=True)
         assert (
             sum(isinstance(item, HTTPException) and item.status_code == 409 for item in outcomes)
             == 1
         )
-        assert (
-            sum(not isinstance(item, BaseException) and item.revision == 2 for item in outcomes)
-            == 1
-        )
+        lease = next(item for item in outcomes if not isinstance(item, BaseException))
+        assert lease.revision == 1 and "SENSITIVE_SENTINEL" not in repr(lease)
+        async with unit_of_work(
+            app.state.session_factory, organization_id=org_id, user_id=user_id
+        ) as db:
+            with pytest.raises(HTTPException) as stale:
+                await commit_turn(
+                    db,
+                    await user(db, user_id),
+                    org_id,
+                    conversation_id,
+                    1,
+                    uuid4(),
+                    next_state,
+                    settings,
+                )
+            assert stale.value.status_code == 409
+            result = await commit_turn(
+                db,
+                await user(db, user_id),
+                org_id,
+                conversation_id,
+                1,
+                lease.token,
+                next_state,
+                settings,
+            )
+            assert result.revision == 2
         async with unit_of_work(
             app.state.session_factory, organization_id=org_id, user_id=user_id
         ) as db:
@@ -156,9 +185,19 @@ async def test_conversation_lifecycle_concurrency_expiry_and_permissions(app):
         async with unit_of_work(
             app.state.session_factory, organization_id=org_id, user_id=user_id
         ) as db:
+            lease = await reserve_turn(
+                db, await user(db, user_id), org_id, conversation_id, 2, settings
+            )
             assert (
                 await commit_turn(
-                    db, await user(db, user_id), org_id, conversation_id, 2, terminal, settings
+                    db,
+                    await user(db, user_id),
+                    org_id,
+                    conversation_id,
+                    2,
+                    lease.token,
+                    terminal,
+                    settings,
                 )
             ).revision == 3
         async with unit_of_work(
@@ -173,3 +212,57 @@ async def test_conversation_lifecycle_concurrency_expiry_and_permissions(app):
                     db, await user(db, user_id), org_id, conversation_id, settings
                 )
             assert finished.value.status_code == 409
+        from dialogentis.runtime.cleanup import recover_abandoned_turns
+
+        async with unit_of_work(
+            app.state.session_factory, organization_id=org_id, user_id=other_id
+        ) as db:
+            abandoned = await reserve_turn(
+                db, await user(db, other_id), org_id, own.id, 1, settings
+            )
+            assert str(abandoned.token) not in repr(abandoned)
+            with pytest.raises(HTTPException) as busy:
+                await read_conversation(db, await user(db, other_id), org_id, own.id, settings)
+            assert busy.value.status_code == 409 and busy.value.headers == {"Retry-After": "1"}
+            row = await db.get(ConversationRecord, own.id)
+            assert row is not None
+            row.processing_expires_at = datetime.now(UTC) - timedelta(seconds=1)
+        async with unit_of_work(
+            app.state.session_factory, organization_id=org_id, user_id=other_id
+        ) as db:
+            with pytest.raises(HTTPException) as expired_lease:
+                await commit_turn(
+                    db,
+                    await user(db, other_id),
+                    org_id,
+                    own.id,
+                    1,
+                    abandoned.token,
+                    next_state,
+                    settings,
+                )
+            assert expired_lease.value.status_code == 409
+            assert await recover_abandoned_turns(db, org_id) == 1
+            assert await recover_abandoned_turns(db, org_id) == 0
+        async with unit_of_work(
+            app.state.session_factory, organization_id=org_id, user_id=other_id
+        ) as db:
+            row = await db.get(ConversationRecord, own.id)
+            assert (
+                row is not None
+                and row.checkpoint is None
+                and row.processing_token is None
+                and row.revision == 2
+            )
+            with pytest.raises(HTTPException) as recovered:
+                await commit_turn(
+                    db,
+                    await user(db, other_id),
+                    org_id,
+                    own.id,
+                    1,
+                    abandoned.token,
+                    next_state,
+                    settings,
+                )
+            assert recovered.value.status_code == 409
