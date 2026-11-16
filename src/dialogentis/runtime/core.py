@@ -11,6 +11,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr, ValidationError
 
 from dialogentis.ask_slot import AskSlotConfig
+from dialogentis.conditions import ConditionConfig, choose_branch
 from dialogentis.datasets.schema import Entity, Intent
 from dialogentis.datasets.validation import normalize_example
 from dialogentis.flow_schema import Flow, FlowNode
@@ -151,6 +152,11 @@ class RuntimeEngine:
             node.id: SetSlotConfig.model_validate(node.config)
             for node in self._flow.nodes
             if node.type == "set_slot"
+        }
+        self._conditions = {
+            node.id: ConditionConfig.model_validate(node.config)
+            for node in self._flow.nodes
+            if node.type == "condition"
         }
         self._start = next(node.id for node in self._flow.nodes if node.type == "start")
         try:
@@ -386,6 +392,9 @@ class RuntimeEngine:
                         fallback_count = 0
                     text = None
                     last_prediction = prediction
+                    node_id = move(node, handle)
+                elif node.type == "condition":
+                    handle = choose_branch(self._conditions[node.id], self._slot_by_id, values)
                     node_id = move(node, handle)
                 elif node.type == "set_slot":
                     assignment = self._sets[node.id]

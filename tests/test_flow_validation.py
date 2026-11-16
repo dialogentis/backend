@@ -181,4 +181,4 @@ def test_structural_check_handles_limits():
     config["flow"]["nodes"], config["flow"]["edges"] = nodes, edges
     errors, warnings = validate_flow(config)
     assert len(nodes) == 300 and len(edges) == 600
-    assert not errors and not warnings
+    assert codes(errors) == {"invalid_condition"} and not warnings

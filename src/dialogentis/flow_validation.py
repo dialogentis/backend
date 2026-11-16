@@ -6,6 +6,7 @@ from uuid import UUID
 from pydantic import ValidationError
 
 from dialogentis.ask_slot import AskSlotConfig, check_ask_config
+from dialogentis.conditions import ConditionConfig, validate_condition
 from dialogentis.datasets.schema import Entity, Intent
 from dialogentis.datasets.validation import Issue
 from dialogentis.flow_schema import Flow
@@ -149,6 +150,12 @@ def validate_flow(config: dict) -> tuple[list[Issue], list[Issue]]:
             "ask_slot": {"success", "invalid", "exhausted"},
             "set_slot": {"next", "error"},
         }
+        if source_node.type == "condition":
+            try:
+                condition = ConditionConfig.model_validate(source_node.config)
+                allowed["condition"] = {"else", *(str(branch.id) for branch in condition.branches)}
+            except ValidationError:
+                pass
         if source_node.type in allowed and edge.source_handle not in allowed[source_node.type]:
             errors.append(
                 Issue((*path, "source_handle"), "invalid_output", "У этого блока нет такого выхода")
@@ -198,6 +205,20 @@ def validate_flow(config: dict) -> tuple[list[Issue], list[Issue]]:
                 errors.append(
                     Issue(path, "missing_output", "Не подключён обязательный выход блока")
                 )
+        if node.type == "condition":
+            try:
+                condition = ConditionConfig.model_validate(node.config)
+                validate_condition(condition, slot_by_id)
+            except ValidationError, ValueError:
+                errors.append(
+                    Issue((*path, "config"), "invalid_condition", "Проверьте условия и параметры")
+                )
+            else:
+                for handle in ("else", *(str(branch.id) for branch in condition.branches)):
+                    if (node.id, handle) not in handles:
+                        errors.append(
+                            Issue(path, "missing_output", "Не подключён обязательный выход блока")
+                        )
         if node.type == "set_slot":
             try:
                 check_set_config(SetSlotConfig.model_validate(node.config), slot_by_id)
