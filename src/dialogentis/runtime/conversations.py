@@ -4,6 +4,8 @@ This internal service does not execute models or expose an API. Callers must run
 runtime with bounded execution and never return the decoded checkpoint to clients.
 """
 
+import re
+import secrets
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from uuid import UUID, uuid4
@@ -12,6 +14,7 @@ from fastapi import HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from dialogentis.auth.security import digest
 from dialogentis.config import Settings
 from dialogentis.jobs.models import Job
 from dialogentis.models import User
@@ -32,6 +35,7 @@ class ConversationSnapshot:
     id: UUID
     revision: int
     state: RuntimeState = field(repr=False)
+    credential: str | None = field(default=None, repr=False)
 
 
 async def _access(db: AsyncSession, user: User, organization_id: UUID) -> None:
@@ -87,12 +91,14 @@ async def create_conversation(
     if state.version_id != version_id or state.turn != 0:
         raise ValueError("Invalid initial runtime state")
     now = await _now(db)
+    credential = secrets.token_urlsafe(32)
     row = TestConversation(
         id=uuid4(),
         organization_id=organization_id,
         agent_id=agent_id,
         version_id=version_id,
         created_by=user.id,
+        credential_hash=digest(credential),
         revision=1,
         created_at=now,
         idle_expires_at=now + timedelta(minutes=30),
@@ -105,11 +111,11 @@ async def create_conversation(
     )
     db.add(row)
     await db.flush()
-    return ConversationSnapshot(row.id, row.revision, state)
+    return ConversationSnapshot(row.id, row.revision, state, credential)
 
 
 async def _locked_row(
-    db: AsyncSession, user: User, organization_id: UUID, conversation_id: UUID
+    db: AsyncSession, user: User, organization_id: UUID, conversation_id: UUID, credential: str
 ) -> tuple[TestConversation, datetime]:
     await _access(db, user, organization_id)
     row = await db.scalar(
@@ -122,7 +128,13 @@ async def _locked_row(
         .with_for_update()
         .execution_options(populate_existing=True)
     )
-    if row is None:
+    if (
+        row is None
+        or not isinstance(credential, str)
+        or re.fullmatch(r"[A-Za-z0-9_-]{43}", credential) is None
+        or row.credential_hash is None
+        or not secrets.compare_digest(row.credential_hash, digest(credential))
+    ):
         raise HTTPException(404, "Диалог не найден")
     now = await _now(db)
     if row.idle_expires_at <= now or row.absolute_expires_at <= now:
@@ -147,10 +159,11 @@ async def reserve_turn(
     conversation_id: UUID,
     expected_revision: int,
     settings: Settings,
+    credential: str,
 ) -> TurnReservation:
     if type(expected_revision) is not int or expected_revision < 1:
         raise ValueError("Invalid revision")
-    row, now = await _locked_row(db, user, organization_id, conversation_id)
+    row, now = await _locked_row(db, user, organization_id, conversation_id, credential)
     if row.processing_token is not None:
         raise HTTPException(
             409, "Ход уже обрабатывается или требует восстановления", headers={"Retry-After": "1"}
@@ -169,9 +182,14 @@ async def reserve_turn(
 
 
 async def read_conversation(
-    db: AsyncSession, user: User, organization_id: UUID, conversation_id: UUID, settings: Settings
+    db: AsyncSession,
+    user: User,
+    organization_id: UUID,
+    conversation_id: UUID,
+    settings: Settings,
+    credential: str,
 ) -> ConversationSnapshot:
-    row, _ = await _locked_row(db, user, organization_id, conversation_id)
+    row, _ = await _locked_row(db, user, organization_id, conversation_id, credential)
     if row.processing_token is not None:
         raise HTTPException(
             409, "Ход уже обрабатывается или требует восстановления", headers={"Retry-After": "1"}
@@ -190,11 +208,12 @@ async def commit_turn(
     token: UUID,
     state: RuntimeState,
     settings: Settings,
+    credential: str,
 ) -> ConversationSnapshot:
     _check_terminal(state)
     if type(expected_revision) is not int or expected_revision < 1:
         raise ValueError("Invalid revision")
-    row, now = await _locked_row(db, user, organization_id, conversation_id)
+    row, now = await _locked_row(db, user, organization_id, conversation_id, credential)
     if row.revision != expected_revision:
         raise HTTPException(409, "Диалог изменился. Обновите состояние")
     if (

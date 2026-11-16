@@ -38,13 +38,23 @@ async def test_real_model_chat_and_revoked_access_during_execution(app, monkeypa
         service = ChatService(app.state.session_factory, app.state.settings, executor)
         started = await service.start(viewer_id, org_id, agent_id, version_id)
         assert started.revision == 1 and started.status == "waiting_input"
-        result = await service.send(viewer_id, org_id, started.conversation_id, 1, "🛸🛸")
+        assert started.credential is not None and started.credential not in repr(started)
+        with pytest.raises(HTTPException) as bad_token:
+            await service.send(viewer_id, org_id, started.conversation_id, 1, "🛸🛸", "x" * 43)
+        assert bad_token.value.status_code == 404
+        result = await service.send(
+            viewer_id, org_id, started.conversation_id, 1, "🛸🛸", started.credential
+        )
         assert result.revision == 2 and "🛸🛸" not in repr(result)
         with pytest.raises(HTTPException) as stale:
-            await service.send(viewer_id, org_id, started.conversation_id, 1, "новый вопрос")
+            await service.send(
+                viewer_id, org_id, started.conversation_id, 1, "новый вопрос", started.credential
+            )
         assert stale.value.status_code == 409
         with pytest.raises(HTTPException) as wrong_user:
-            await service.send(user_id, org_id, started.conversation_id, 2, "новый вопрос")
+            await service.send(
+                user_id, org_id, started.conversation_id, 2, "новый вопрос", started.credential
+            )
         assert wrong_user.value.status_code == 404
         async with unit_of_work(app.state.session_factory, organization_id=org_id) as db:
             row = await db.get(ConversationRecord, started.conversation_id)
@@ -64,7 +74,7 @@ async def test_real_model_chat_and_revoked_access_during_execution(app, monkeypa
 
         monkeypatch.setattr(executor, "execute", paused)
         task = asyncio.create_task(
-            service.send(viewer_id, org_id, started.conversation_id, 2, "🧩🧩")
+            service.send(viewer_id, org_id, started.conversation_id, 2, "🧩🧩", started.credential)
         )
         await asyncio.wait_for(ready.wait(), 10)
         try:

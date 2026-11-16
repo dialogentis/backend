@@ -37,6 +37,7 @@ class ChatResponse:
     messages: tuple[str, ...] = field(repr=False)
     trace: tuple[TraceEvent, ...] = field(repr=False)
     error_code: str | None = None
+    credential: str | None = field(default=None, repr=False)
 
 
 @dataclass(frozen=True)
@@ -148,12 +149,19 @@ class TestChatService:
                     result.messages,
                     result.trace,
                     result.error_code,
+                    saved.credential,
                 )
         except TimeoutError:
             raise ExecutionError("runtime_request_timeout") from None
 
     async def send(
-        self, user_id: UUID, org_id: UUID, conversation_id: UUID, revision: int, text: str
+        self,
+        user_id: UUID,
+        org_id: UUID,
+        conversation_id: UUID,
+        revision: int,
+        text: str,
+        credential: str,
     ) -> ChatResponse:
         if not isinstance(text, str) or not 1 <= len(text) <= 2000:
             raise ExecutionError("runtime_invalid_request")
@@ -168,7 +176,7 @@ class TestChatService:
                 ) as db:
                     user = await self._user(db, user_id)
                     saved = await read_conversation(
-                        db, user, org_id, conversation_id, self.settings
+                        db, user, org_id, conversation_id, self.settings, credential
                     )
                     if saved.revision != revision:
                         raise HTTPException(409, "Диалог изменился. Обновите состояние")
@@ -185,6 +193,7 @@ class TestChatService:
                         conversation_id,
                         revision,
                         self.settings,
+                        credential,
                     )
                 result = await self._execute("send", bundle, reservation.state, text)
                 async with unit_of_work(
@@ -199,6 +208,7 @@ class TestChatService:
                         reservation.token,
                         result.state,
                         self.settings,
+                        credential,
                     )
                 return ChatResponse(
                     saved.id,

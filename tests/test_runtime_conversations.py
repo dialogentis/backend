@@ -91,6 +91,8 @@ async def test_conversation_lifecycle_concurrency_expiry_and_permissions(app):
             created = await create_conversation(
                 db, await user(db, user_id), org_id, agent_id, version_id, initial, settings
             )
+            credential = created.credential
+            assert credential is not None
             conversation_id = created.id
             assert created.revision == 1 and "SENSITIVE_SENTINEL" not in repr(created)
         async with unit_of_work(
@@ -98,12 +100,19 @@ async def test_conversation_lifecycle_concurrency_expiry_and_permissions(app):
         ) as db:
             with pytest.raises(HTTPException) as forbidden:
                 await read_conversation(
-                    db, await user(db, other_id), org_id, conversation_id, settings
+                    db,
+                    await user(db, other_id),
+                    org_id,
+                    conversation_id,
+                    settings,
+                    credential,
                 )
             assert forbidden.value.status_code == 404
             own = await create_conversation(
                 db, await user(db, other_id), org_id, agent_id, version_id, initial, settings
             )
+            own_credential = own.credential
+            assert own_credential is not None
             assert own.id != conversation_id
         async with unit_of_work(
             app.state.session_factory, organization_id=org_id, user_id=user_id
@@ -114,9 +123,22 @@ async def test_conversation_lifecycle_concurrency_expiry_and_permissions(app):
                 and saved.checkpoint is not None
                 and b"SENSITIVE_SENTINEL" not in saved.checkpoint
             )
+            assert saved.credential_hash is not None and saved.credential_hash != credential
+            assert credential not in repr(created)
+            for invalid in ("", "x" * 43, own_credential, "☃" * 43, credential + "x"):
+                with pytest.raises(HTTPException) as invalid_token:
+                    await read_conversation(
+                        db, await user(db, user_id), org_id, conversation_id, settings, invalid
+                    )
+                assert invalid_token.value.status_code == 404
             assert (
                 await read_conversation(
-                    db, await user(db, user_id), org_id, conversation_id, settings
+                    db,
+                    await user(db, user_id),
+                    org_id,
+                    conversation_id,
+                    settings,
+                    credential,
                 )
             ).state == initial
         next_state = initial.model_copy(update={"turn": 1})
@@ -126,7 +148,13 @@ async def test_conversation_lifecycle_concurrency_expiry_and_permissions(app):
                 app.state.session_factory, organization_id=org_id, user_id=user_id
             ) as db:
                 return await reserve_turn(
-                    db, await user(db, user_id), org_id, conversation_id, 1, settings
+                    db,
+                    await user(db, user_id),
+                    org_id,
+                    conversation_id,
+                    1,
+                    settings,
+                    credential,
                 )
 
         outcomes = await asyncio.gather(reserve(), reserve(), return_exceptions=True)
@@ -149,6 +177,7 @@ async def test_conversation_lifecycle_concurrency_expiry_and_permissions(app):
                     uuid4(),
                     next_state,
                     settings,
+                    credential,
                 )
             assert stale.value.status_code == 409
             result = await commit_turn(
@@ -160,6 +189,7 @@ async def test_conversation_lifecycle_concurrency_expiry_and_permissions(app):
                 lease.token,
                 next_state,
                 settings,
+                credential,
             )
             assert result.revision == 2
         async with unit_of_work(
@@ -173,7 +203,12 @@ async def test_conversation_lifecycle_concurrency_expiry_and_permissions(app):
         ) as db:
             with pytest.raises(HTTPException) as expired:
                 await read_conversation(
-                    db, await user(db, user_id), org_id, conversation_id, settings
+                    db,
+                    await user(db, user_id),
+                    org_id,
+                    conversation_id,
+                    settings,
+                    credential,
                 )
             assert expired.value.status_code == 410
             row = await db.get(ConversationRecord, conversation_id)
@@ -186,7 +221,13 @@ async def test_conversation_lifecycle_concurrency_expiry_and_permissions(app):
             app.state.session_factory, organization_id=org_id, user_id=user_id
         ) as db:
             lease = await reserve_turn(
-                db, await user(db, user_id), org_id, conversation_id, 2, settings
+                db,
+                await user(db, user_id),
+                org_id,
+                conversation_id,
+                2,
+                settings,
+                credential,
             )
             assert (
                 await commit_turn(
@@ -198,6 +239,7 @@ async def test_conversation_lifecycle_concurrency_expiry_and_permissions(app):
                     lease.token,
                     terminal,
                     settings,
+                    credential,
                 )
             ).revision == 3
         async with unit_of_work(
@@ -209,7 +251,12 @@ async def test_conversation_lifecycle_concurrency_expiry_and_permissions(app):
             assert row is not None and row.checkpoint is None
             with pytest.raises(HTTPException) as finished:
                 await read_conversation(
-                    db, await user(db, user_id), org_id, conversation_id, settings
+                    db,
+                    await user(db, user_id),
+                    org_id,
+                    conversation_id,
+                    settings,
+                    credential,
                 )
             assert finished.value.status_code == 409
         from dialogentis.runtime.cleanup import recover_abandoned_turns
@@ -218,11 +265,13 @@ async def test_conversation_lifecycle_concurrency_expiry_and_permissions(app):
             app.state.session_factory, organization_id=org_id, user_id=other_id
         ) as db:
             abandoned = await reserve_turn(
-                db, await user(db, other_id), org_id, own.id, 1, settings
+                db, await user(db, other_id), org_id, own.id, 1, settings, own_credential
             )
             assert str(abandoned.token) not in repr(abandoned)
             with pytest.raises(HTTPException) as busy:
-                await read_conversation(db, await user(db, other_id), org_id, own.id, settings)
+                await read_conversation(
+                    db, await user(db, other_id), org_id, own.id, settings, own_credential
+                )
             assert busy.value.status_code == 409 and busy.value.headers == {"Retry-After": "1"}
             row = await db.get(ConversationRecord, own.id)
             assert row is not None
@@ -240,6 +289,7 @@ async def test_conversation_lifecycle_concurrency_expiry_and_permissions(app):
                     abandoned.token,
                     next_state,
                     settings,
+                    own_credential,
                 )
             assert expired_lease.value.status_code == 409
             assert await recover_abandoned_turns(db, org_id) == 1
@@ -264,5 +314,6 @@ async def test_conversation_lifecycle_concurrency_expiry_and_permissions(app):
                     abandoned.token,
                     next_state,
                     settings,
+                    own_credential,
                 )
             assert recovered.value.status_code == 409
