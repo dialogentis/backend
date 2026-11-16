@@ -18,6 +18,8 @@ from dialogentis.jobs.broker import create_broker
 from dialogentis.jobs.dispatcher import dispatcher_factory
 from dialogentis.jobs.lifecycle import recover_tenant
 from dialogentis.jobs.models import MaintenanceRun, OutboxEvent
+from dialogentis.runtime.cleanup import cleanup_expired_conversations
+from dialogentis.runtime.models import TestConversation
 
 broker = create_broker("dialogentis.maintenance")
 
@@ -34,6 +36,9 @@ async def reconcile_once(
             return False
         async with dispatch_factory() as db:
             organizations = (await db.scalars(select(OutboxEvent.organization_id).distinct())).all()
+            conversation_organizations = (
+                await db.scalars(select(TestConversation.organization_id).distinct())
+            ).all()
             artifact_organizations = (
                 await db.scalars(select(Artifact.organization_id).distinct())
             ).all()
@@ -44,6 +49,12 @@ async def reconcile_once(
             async with unit_of_work(factory, organization_id=organization_id) as db:
                 await scrub_exports(db, organization_id)
                 await scrub_imports(db, organization_id)
+        for organization_id in conversation_organizations:
+            for _ in range(10):
+                async with unit_of_work(factory, organization_id=organization_id) as db:
+                    removed = await cleanup_expired_conversations(db, organization_id)
+                if removed < 100:
+                    break
         storage = ArtifactStorage(get_settings().artifact_root)
         filesystem_organizations = await asyncio.to_thread(storage.organizations)
         for organization_id in set(artifact_organizations) | set(filesystem_organizations):
