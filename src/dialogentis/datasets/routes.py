@@ -9,6 +9,7 @@ from dialogentis.agents import agent_and_draft
 from dialogentis.api_errors import DomainValidationError
 from dialogentis.ask_slot import validate_ask_references
 from dialogentis.auth.security import VerifiedUser
+from dialogentis.conditions import validate_condition_references
 from dialogentis.contracts import InputModel
 from dialogentis.datasets.preview import Preview, run_preview
 from dialogentis.datasets.schema import Dataset, validate_dataset
@@ -114,6 +115,7 @@ def validate_configuration(config: dict) -> tuple[list[Issue], list[Issue]]:
         *branch_errors,
         *validate_ask_references(flow, slots, dataset.entities),
         *validate_set_references(flow, slots),
+        *validate_condition_references(flow, slots),
     ], [
         *warnings,
         *branch_warnings,

@@ -6,6 +6,7 @@ from uuid import UUID
 from pydantic import Field, StrictInt, ValidationError, field_validator, model_validator
 
 from dialogentis.ask_slot import AskSlotDraftConfig
+from dialogentis.conditions import ConditionDraftConfig, validate_draft_condition
 from dialogentis.contracts import InputModel
 from dialogentis.datasets.csv_import import MAX_ERRORS, MAX_FILE_BYTES, unique_object
 from dialogentis.datasets.schema import Dataset, Entity, Example, Intent, validate_dataset
@@ -50,6 +51,7 @@ class PortableConfig(InputModel):
             "end": {"text"},
             "ask_slot": {"slot_id", "prompt", "entity_id", "max_attempts", "checks"},
             "set_slot": {"slot_id", "operation", "source", "source_slot_id", "value"},
+            "condition": {"branches"},
         }
         if self.flow.layout:
             raise ValueError("Unsupported layout")
@@ -76,6 +78,9 @@ class PortableConfig(InputModel):
                 not isinstance(node.config["example"], str) or len(node.config["example"]) > 500
             ):
                 raise ValueError("Invalid fallback example")
+            if node.type == "condition":
+                condition = ConditionDraftConfig.model_validate(node.config)
+                validate_draft_condition(condition, {slot.id: slot for slot in self.slots})
             if node.type == "set_slot":
                 assignment = SetSlotDraftConfig.model_validate(node.config)
                 if any(
@@ -105,7 +110,20 @@ class PortableConfig(InputModel):
                 or handle in handles
                 or edge.source not in nodes
                 or edge.target not in nodes
-                or edge.source_handle not in outputs.get(nodes[edge.source].type, set())
+                or edge.source_handle
+                not in (
+                    {
+                        "else",
+                        *(
+                            str(branch.id)
+                            for branch in ConditionDraftConfig.model_validate(
+                                nodes[edge.source].config
+                            ).branches
+                        ),
+                    }
+                    if nodes[edge.source].type == "condition"
+                    else outputs.get(nodes[edge.source].type, set())
+                )
             ):
                 raise ValueError("Invalid edge")
             edge_ids.add(edge.id)

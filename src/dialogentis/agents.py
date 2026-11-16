@@ -216,6 +216,11 @@ async def get_agent(
 def copy_config(config: dict) -> dict:
     """Copy only configurations whose internal references are understood."""
     from dialogentis.ask_slot import AskSlotDraftConfig
+    from dialogentis.conditions import (
+        ConditionDraftConfig,
+        remap_condition_expression,
+        validate_draft_condition,
+    )
     from dialogentis.datasets.schema import Dataset
     from dialogentis.drafts import DraftConfig
     from dialogentis.set_slot import SetSlotDraftConfig
@@ -240,6 +245,7 @@ def copy_config(config: dict) -> dict:
         "end": {"text"},
         "ask_slot": {"slot_id", "prompt", "entity_id", "max_attempts", "checks"},
         "set_slot": {"slot_id", "operation", "source", "source_slot_id", "value"},
+        "condition": {"branches"},
     }
     if flow["layout"]:
         raise HTTPException(409, "Копирование этого черновика пока недоступно")
@@ -266,9 +272,27 @@ def copy_config(config: dict) -> dict:
         "ask_slot": {"success", "invalid", "exhausted"},
         "set_slot": {"next", "error"},
     }
+    conditions = {}
+    for node in flow["nodes"]:
+        if node["type"] == "condition":
+            try:
+                condition = ConditionDraftConfig.model_validate(node["config"])
+                validate_draft_condition(condition, {slot.id: slot for slot in slots})
+            except ValidationError, ValueError:
+                raise HTTPException(409, "Нельзя скопировать некорректное условие") from None
+            conditions[node["id"]] = condition
+    branch_mapping = {
+        node_id: {str(branch.id): str(uuid4()) for branch in condition.branches}
+        for node_id, condition in conditions.items()
+    }
     handles = [(edge["source"], edge["source_handle"]) for edge in flow["edges"]]
     if len(handles) != len(set(handles)) or any(
-        edge["source_handle"] not in outputs.get(node_types[edge["source"]], set())
+        edge["source_handle"]
+        not in (
+            {"else", *branch_mapping[edge["source"]]}
+            if node_types[edge["source"]] == "condition"
+            else outputs.get(node_types[edge["source"]], set())
+        )
         for edge in flow["edges"]
     ):
         raise HTTPException(409, "Копирование этого сценария пока недоступно")
@@ -335,6 +359,11 @@ def copy_config(config: dict) -> dict:
         item["id"] = data_mapping["slots"][UUID(item["id"])]
     clone["flow"]["flow_id"] = str(uuid4())
     for node in clone["flow"]["nodes"]:
+        old_node_id = node["id"]
+        if node["type"] == "condition":
+            for branch in node["config"]["branches"]:
+                branch["id"] = branch_mapping[old_node_id][str(UUID(branch["id"]))]
+                remap_condition_expression(branch["expression"], data_mapping["slots"])
         node["id"] = mapping[node["id"]]
         if "resume_node_id" in node["config"]:
             node["config"]["resume_node_id"] = mapping[node["config"]["resume_node_id"]]
@@ -350,6 +379,8 @@ def copy_config(config: dict) -> dict:
                     node["config"][key] = data_mapping[collection][UUID(reference)]
     for edge in clone["flow"]["edges"]:
         edge["id"] = str(uuid4())
+        if node_types[edge["source"]] == "condition" and edge["source_handle"] != "else":
+            edge["source_handle"] = branch_mapping[edge["source"]][edge["source_handle"]]
         if node_types[edge["source"]] == "switch_intent" and edge["source_handle"] != "fallback":
             edge["source_handle"] = data_mapping["intents"][UUID(edge["source_handle"])]
         edge["source"] = mapping[edge["source"]]

@@ -15,7 +15,11 @@ class Branch(InputModel):
     expression: dict[str, JsonValue]
 
 
-class ConditionConfig(InputModel):
+class ConditionDraftConfig(InputModel):
+    branches: list[Branch] = Field(default_factory=list, max_length=50)
+
+
+class ConditionConfig(ConditionDraftConfig):
     branches: list[Branch] = Field(min_length=1, max_length=50)
 
 
@@ -60,6 +64,47 @@ def validate_expression(expression: object, slots: dict[UUID, Slot], depth: int 
             Slot.model_validate({**slot.model_dump(), "default": value})
         except ValidationError, UnicodeError:
             raise ValueError("Invalid operand type") from None
+
+
+def validate_draft_condition(config: ConditionDraftConfig, slots: dict[UUID, Slot]) -> None:
+    if len({branch.id for branch in config.branches}) != len(config.branches):
+        raise ValueError("Duplicate branch")
+
+    def check(expression: object, depth: int) -> None:
+        if depth > 3 or not isinstance(expression, dict):
+            raise ValueError("Invalid expression")
+        kind = expression.get("op")
+        if kind in ("all", "any"):
+            children = expression.get("conditions")
+            if (
+                set(expression) != {"op", "conditions"}
+                or not isinstance(children, list)
+                or len(children) > 20
+            ):
+                raise ValueError("Invalid composition")
+            for child in children:
+                check(child, depth + 1)
+        elif kind in ("eq", "ne", "gt", "gte", "lt", "lte", "in", "exists"):
+            if set(expression) - {"op", "slot_id", "value"}:
+                raise ValueError("Invalid comparison")
+            ref = expression.get("slot_id")
+            if ref is not None:
+                try:
+                    if not isinstance(ref, str) or UUID(ref) not in slots:
+                        raise ValueError("Unknown slot")
+                except ValueError:
+                    raise ValueError("Unknown slot") from None
+            value = expression.get("value")
+            if isinstance(value, dict) or (
+                isinstance(value, list)
+                and (len(value) > 100 or any(isinstance(item, (list, dict)) for item in value))
+            ):
+                raise ValueError("Invalid operand")
+        else:
+            raise ValueError("Unknown operator")
+
+    for branch in config.branches:
+        check(branch.expression, 1)
 
 
 def validate_condition(config: ConditionConfig, slots: dict[UUID, Slot]) -> None:
@@ -107,3 +152,45 @@ def choose_branch(config: ConditionConfig, slots: dict[UUID, Slot], values: dict
         if evaluate_expression(branch.expression, slots, values):
             return str(branch.id)
     return "else"
+
+
+def validate_condition_references(flow, slots: list[Slot]):
+    """Protect references even while a condition is incomplete in a draft."""
+    from dialogentis.datasets.validation import Issue
+
+    ids = {slot.id for slot in slots}
+    issues = []
+    for index, node in enumerate(flow.nodes):
+        if node.type != "condition":
+            continue
+        pending = [node.config.get("branches")]
+        while pending:
+            value = pending.pop()
+            if isinstance(value, list):
+                pending.extend(value)
+            elif isinstance(value, dict):
+                if "slot_id" in value and value["slot_id"] is not None:
+                    raw = value["slot_id"]
+                    try:
+                        ref = UUID(raw) if isinstance(raw, str) else None
+                    except ValueError:
+                        ref = None
+                    if ref not in ids:
+                        issues.append(
+                            Issue(
+                                ("flow", "nodes", index, "config"),
+                                "unknown_condition_slot",
+                                "Параметр условия не найден",
+                            )
+                        )
+                pending.extend(value.values())
+    return issues
+
+
+def remap_condition_expression(expression: dict, slots: dict[UUID, str]) -> None:
+    if expression["op"] in ("all", "any"):
+        for child in expression["conditions"]:
+            remap_condition_expression(child, slots)
+    else:
+        if expression.get("slot_id") is not None:
+            expression["slot_id"] = slots[UUID(expression["slot_id"])]
