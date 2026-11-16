@@ -70,3 +70,32 @@ async def recover_abandoned_turns(db: AsyncSession, organization_id: UUID) -> in
         .returning(TestConversation.id)
     )
     return len(updated.all())
+
+
+async def cleanup_expired_receipts(db: AsyncSession, organization_id: UUID) -> int:
+    from dialogentis.runtime.receipt_models import RuntimeReceipt
+
+    ids = (
+        await db.scalars(
+            select(RuntimeReceipt.id)
+            .where(
+                RuntimeReceipt.organization_id == organization_id,
+                RuntimeReceipt.expires_at <= func.now(),
+            )
+            .order_by(RuntimeReceipt.expires_at, RuntimeReceipt.id)
+            .limit(100)
+            .with_for_update(skip_locked=True)
+        )
+    ).all()
+    if not ids:
+        return 0
+    deleted = await db.scalars(
+        delete(RuntimeReceipt)
+        .where(
+            RuntimeReceipt.organization_id == organization_id,
+            RuntimeReceipt.id.in_(ids),
+            RuntimeReceipt.expires_at <= func.now(),
+        )
+        .returning(RuntimeReceipt.id)
+    )
+    return len(deleted.all())

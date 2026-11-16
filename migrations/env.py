@@ -8,6 +8,7 @@ import dialogentis.datasets.import_models  # noqa: F401 - register import tables
 import dialogentis.jobs.models  # noqa: F401 - register job tables
 import dialogentis.organizations  # noqa: F401 - register organization tables
 import dialogentis.runtime.models  # noqa: F401 - register conversation tables
+import dialogentis.runtime.receipt_models  # noqa: F401 - register receipt tables
 import dialogentis.versions.models  # noqa: F401 - register immutable version tables
 from dialogentis.config import get_settings
 from dialogentis.models import Base
