@@ -14,7 +14,7 @@ from dialogentis.config import Settings
 from dialogentis.datasets.validation import Issue
 from dialogentis.db import unit_of_work
 from dialogentis.flow_validation import validate_flow
-from dialogentis.http_action import HttpActionConfig, MockIntegration
+from dialogentis.http_action import HttpActionConfig, MockIntegration, mock_http_action
 from dialogentis.integrations.models import Integration
 from dialogentis.jobs.models import Job
 from dialogentis.models import User
@@ -26,6 +26,7 @@ from dialogentis.runtime.executor import ExecutionError, RuntimeExecutor
 from dialogentis.runtime.idempotency import Replay, complete_message, reserve_message
 from dialogentis.runtime.limits import run_limited
 from dialogentis.runtime.models import TestConversation
+from dialogentis.slots import validate_slots
 from dialogentis.versions.models import AgentVersion
 from dialogentis.versions.prepare import version_status
 
@@ -166,6 +167,34 @@ class TestChatService:
     async def _execute_in_slot(
         self, action: str, bundle: _Bundle, state=None, text=None
     ) -> RuntimeResult:
+        config = bundle.snapshot["config"]
+        parsed_slots, errors = validate_slots(config.get("slots", []))
+        if errors:
+            raise ExecutionError("runtime_invalid_request")
+        slots = {slot.id: slot for slot in parsed_slots}
+        actions = {
+            UUID(node["id"]): HttpActionConfig.model_validate(node["config"])
+            for node in config["flow"]["nodes"]
+            if node["type"] == "http_action"
+        }
+        integrations = {item.id: item for item in bundle.mock_integrations}
+
+        async def handle_http(node_id: UUID, inputs: dict) -> tuple[str, dict]:
+            http_action = actions[node_id]
+            values = dict(inputs)
+            outcome = mock_http_action(
+                http_action, integrations.get(http_action.integration_id), slots, values
+            )
+            updates = (
+                {
+                    slots[slot_id].code: values[slots[slot_id].code]
+                    for slot_id in http_action.response_mapping.values()
+                }
+                if outcome == "success"
+                else {}
+            )
+            return outcome, updates
+
         if action == "start":
             return await self.executor.execute(
                 action="start",
@@ -174,7 +203,7 @@ class TestChatService:
                 identity=bundle.identity,
                 model=bundle.model,
                 settings=self.settings,
-                mock_integrations=bundle.mock_integrations,
+                http_handler=handle_http if actions else None,
             )
         return await self.executor.execute(
             action="send",
@@ -185,7 +214,7 @@ class TestChatService:
             settings=self.settings,
             state=state,
             text=text,
-            mock_integrations=bundle.mock_integrations,
+            http_handler=handle_http if actions else None,
         )
 
     async def start(

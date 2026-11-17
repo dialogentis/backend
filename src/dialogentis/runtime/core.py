@@ -16,7 +16,12 @@ from dialogentis.datasets.schema import Entity, Intent
 from dialogentis.datasets.validation import normalize_example
 from dialogentis.flow_schema import Flow, FlowNode
 from dialogentis.flow_validation import validate_flow
-from dialogentis.http_action import HttpActionConfig, MockIntegration, mock_http_action
+from dialogentis.http_action import (
+    HTTP_OUTPUTS,
+    HttpActionConfig,
+    MockIntegration,
+    mock_http_action,
+)
 from dialogentis.runtime.slot_values import SlotValueError, parse_slot_value, valid_value
 from dialogentis.set_slot import SetSlotConfig
 from dialogentis.slots import Slot, validate_slots
@@ -128,6 +133,7 @@ class RuntimeEngine:
         predict: Callable[[str], Prediction],
         *,
         mock_integrations: list[MockIntegration] | None = None,
+        http_handler: Callable[[UUID, dict], tuple[str, dict]] | None = None,
     ):
         errors, _ = validate_flow(config)
         if errors:
@@ -169,6 +175,7 @@ class RuntimeEngine:
         self._mock_integrations = (
             {item.id: item for item in mock_integrations} if mock_integrations is not None else None
         )
+        self._http_handler = http_handler
         self._conditions = {
             node.id: ConditionConfig.model_validate(node.config)
             for node in self._flow.nodes
@@ -413,17 +420,42 @@ class RuntimeEngine:
                 elif node.type == "condition":
                     handle = choose_branch(self._conditions[node.id], self._slot_by_id, values)
                     node_id = move(node, handle)
-                elif node.type == "http_action" and self._mock_integrations is not None:
+                elif node.type == "http_action" and (
+                    self._mock_integrations is not None or self._http_handler is not None
+                ):
                     http_actions += 1
                     if http_actions > 3:
                         raise RuntimeFault("http_action_limit")
                     action = self._http_actions[node.id]
-                    outcome = mock_http_action(
-                        action,
-                        self._mock_integrations.get(action.integration_id),
-                        self._slot_by_id,
-                        values,
-                    )
+                    if self._http_handler is not None:
+                        codes = {
+                            self._slot_by_id[slot_id].code
+                            for mapping in (action.query, action.body)
+                            for slot_id in mapping.values()
+                        }
+                        outcome, updates = self._http_handler(
+                            node.id, {code: values.get(code) for code in codes}
+                        )
+                        allowed = {
+                            self._slot_by_id[slot_id].code
+                            for slot_id in action.response_mapping.values()
+                        }
+                        if (
+                            outcome not in HTTP_OUTPUTS
+                            or not isinstance(updates, dict)
+                            or (set(updates) - allowed or (outcome != "success" and updates))
+                        ):
+                            raise RuntimeFault("invalid_http_result")
+                        self._check_values(updates, "invalid_http_result")
+                        values.update(updates)
+                    else:
+                        assert self._mock_integrations is not None
+                        outcome = mock_http_action(
+                            action,
+                            self._mock_integrations.get(action.integration_id),
+                            self._slot_by_id,
+                            values,
+                        )
                     node_id = move(node, outcome)
                 elif node.type == "set_slot":
                     assignment = self._sets[node.id]

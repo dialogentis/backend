@@ -2,6 +2,7 @@
 
 import json
 import os
+import queue
 import struct
 import sys
 import threading
@@ -33,6 +34,36 @@ def _watch_parent() -> None:
         os._exit(73)
 
 
+def _read_replies(replies: queue.Queue) -> None:
+    def read_exact(size: int) -> bytes:
+        data = bytearray()
+        while len(data) < size:
+            part = os.read(sys.stdin.fileno(), size - len(data))
+            if not part:
+                raise EOFError()
+            data.extend(part)
+        return bytes(data)
+
+    try:
+        while True:
+            size = struct.unpack(">I", read_exact(4))[0]
+            if not 1 <= size <= MAX_RESPONSE:
+                raise ValueError("Invalid response size")
+            replies.put(json.loads(read_exact(size)))
+    except Exception:
+        os._exit(73)
+
+
+def _write_frame(value: dict) -> None:
+    output = json.dumps(
+        value, ensure_ascii=False, allow_nan=False, default=str, separators=(",", ":")
+    ).encode("utf-8")
+    if not 1 <= len(output) <= MAX_RESPONSE:
+        raise ValueError("Runtime output too large")
+    sys.stdout.buffer.write(struct.pack(">I", len(output)) + output)
+    sys.stdout.buffer.flush()
+
+
 def main() -> None:
     request_size, model_size = struct.unpack(">II", _read_exact(8))
     model_limit = int(os.environ["DIALOGENTIS_RUNTIME_MODEL_LIMIT"])
@@ -40,7 +71,13 @@ def main() -> None:
         raise ValueError("Invalid request size")
     request = json.loads(_read_exact(request_size))
     model = _read_exact(model_size)
-    threading.Thread(target=_watch_parent, daemon=True).start()
+    replies: queue.Queue = queue.Queue(maxsize=1)
+    bridged = request.get("http_bridge") is True
+    threading.Thread(
+        target=_read_replies if bridged else _watch_parent,
+        args=(replies,) if bridged else (),
+        daemon=True,
+    ).start()
     identity = ModelIdentity(
         *(
             UUID(request[key])
@@ -58,6 +95,14 @@ def main() -> None:
     )
     adapter = unpack_model(model, identity, settings)
     mock_integrations = request["mock_integrations"]
+
+    def http_handler(node_id: UUID, values: dict) -> tuple[str, dict]:
+        _write_frame({"kind": "http_action", "node_id": str(node_id), "values": values})
+        reply = replies.get()
+        if not isinstance(reply, dict) or set(reply) != {"outcome", "updates"}:
+            raise ValueError("Invalid action response")
+        return reply["outcome"], reply["updates"]
+
     engine = RuntimeEngine(
         identity.version_id,
         snapshot["config"],
@@ -67,6 +112,7 @@ def main() -> None:
             if mock_integrations is not None
             else None
         ),
+        http_handler=http_handler if bridged else None,
     )
     if request["action"] == "start":
         result = engine.start()
@@ -74,22 +120,13 @@ def main() -> None:
         result = engine.send(RuntimeState.model_validate(request["state"]), request["text"])
     else:
         raise ValueError("Unknown action")
-    output = json.dumps(
-        {
-            "state": result.state.model_dump(mode="json"),
-            "messages": result.messages,
-            "trace": [asdict(event) for event in result.trace],
-            "error_code": result.error_code,
-        },
-        ensure_ascii=False,
-        allow_nan=False,
-        default=str,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    if len(output) > MAX_RESPONSE:
-        raise ValueError("Runtime output too large")
-    sys.stdout.buffer.write(struct.pack(">I", len(output)) + output)
-    sys.stdout.buffer.flush()
+    output = {
+        "state": result.state.model_dump(mode="json"),
+        "messages": result.messages,
+        "trace": [asdict(event) for event in result.trace],
+        "error_code": result.error_code,
+    }
+    _write_frame({"kind": "result", "result": output} if bridged else output)
 
 
 if __name__ == "__main__":
