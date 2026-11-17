@@ -11,7 +11,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from dialogentis.artifact_service import read_artifact
 from dialogentis.artifacts import ArtifactStorage
 from dialogentis.config import Settings
+from dialogentis.datasets.validation import Issue
 from dialogentis.db import unit_of_work
+from dialogentis.flow_validation import validate_flow
 from dialogentis.jobs.models import Job
 from dialogentis.models import User
 from dialogentis.nlu.model_store import ModelIdentity
@@ -46,6 +48,12 @@ class _Bundle:
     snapshot: dict = field(repr=False)
     config_hash: str
     model: bytes = field(repr=False)
+
+
+class InvalidVersionFlow(ValueError):
+    def __init__(self, errors: list[Issue]):
+        super().__init__("Invalid version flow")
+        self.errors = errors
 
 
 class TestChatService:
@@ -98,6 +106,9 @@ class TestChatService:
         version, job = pair
         if version_status(version, job) != "ready" or version.model_artifact_id is None:
             raise HTTPException(409, "Версия агента ещё не готова")
+        errors, _ = await asyncio.to_thread(validate_flow, version.snapshot["config"])
+        if errors:
+            raise InvalidVersionFlow(errors)
         identity = ModelIdentity(org_id, agent_id, version_id, version.model_artifact_id)
         content = await read_artifact(
             db,

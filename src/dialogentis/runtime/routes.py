@@ -6,11 +6,13 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from pydantic import BaseModel, Field, StrictInt, StrictStr
 
+from dialogentis.api_errors import error_response
 from dialogentis.auth.security import current_user
 from dialogentis.contracts import InputModel
+from dialogentis.datasets.routes import issue_view
 from dialogentis.db import unit_of_work
 from dialogentis.runtime.executor import EventView, ExecutionError
-from dialogentis.runtime.test_chat import ChatResponse, TestChatService
+from dialogentis.runtime.test_chat import ChatResponse, InvalidVersionFlow, TestChatService
 
 router = APIRouter(prefix="/api/v1/organizations/{org_id}", tags=["test-chat"])
 ConversationToken = Annotated[
@@ -83,12 +85,24 @@ def view(result: ChatResponse) -> ChatView:
     )
 
 
+def invalid_flow_response(request: Request, exc: InvalidVersionFlow):
+    return error_response(
+        request,
+        409,
+        "invalid_version_flow",
+        "В сценарии этой версии есть ошибки. Исправьте черновик и обучите агента заново.",
+        [issue_view(issue).model_dump(mode="json") for issue in exc.errors[:100]],
+    )
+
+
 @router.post("/agents/{agent_id}/test-conversations", response_model=StartedChat, status_code=201)
 async def start_chat(
     org_id: UUID, agent_id: UUID, body: StartInput, request: Request, user_id: ChatUser
-) -> StartedChat:
+):
     try:
         result = await service(request).start(user_id, org_id, agent_id, body.version_id)
+    except InvalidVersionFlow as exc:
+        return invalid_flow_response(request, exc)
     except ExecutionError:
         raise HTTPException(503, "Не удалось запустить тестовый диалог") from None
     assert result.credential is not None
@@ -104,7 +118,7 @@ async def send_message(
     user_id: ChatUser,
     token: ConversationToken,
     key: IdempotencyKey,
-) -> ChatView:
+):
     try:
         result = await service(request).send(
             user_id,
@@ -116,6 +130,8 @@ async def send_message(
             body.client_message_id,
             key,
         )
+    except InvalidVersionFlow as exc:
+        return invalid_flow_response(request, exc)
     except ExecutionError:
         raise HTTPException(503, "Не удалось обработать сообщение") from None
     return view(result)

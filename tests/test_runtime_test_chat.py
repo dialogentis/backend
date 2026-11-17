@@ -1,5 +1,6 @@
 import asyncio
 import os
+from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
@@ -12,7 +13,7 @@ from dialogentis.db import unit_of_work
 from dialogentis.jobs.dispatcher import dispatcher_factory
 from dialogentis.jobs.tasks import process_job
 from dialogentis.jobs.training_tasks import HANDLERS
-from dialogentis.models import Membership, Organization
+from dialogentis.models import AgentDraft, Membership, Organization
 from dialogentis.runtime.executor import RuntimeExecutor
 from dialogentis.runtime.models import TestConversation as ConversationRecord
 from dialogentis.runtime.receipt_models import RuntimeReceipt
@@ -28,6 +29,31 @@ pytestmark = [
         os.environ.get("RUN_INTEGRATION") != "1", reason="Run with Compose test profile"
     ),
 ]
+
+
+async def test_start_reports_errors_in_the_selected_version(app):
+    async with client_for(app) as owner, client_for(app) as stranger:
+        user_id, org_id, agent_id = await create_agent(app, owner)
+        await create_agent(app, stranger)
+        await populate(app, org_id, agent_id)
+        async with unit_of_work(app.state.session_factory, organization_id=org_id) as db:
+            draft = await db.scalar(select(AgentDraft).where(AgentDraft.agent_id == agent_id))
+            assert draft is not None
+            configuration = deepcopy(draft.configuration)
+            configuration["flow"]["edges"] = []
+            draft.configuration = configuration
+        version = (await prepare(app, user_id, org_id, agent_id, 1, "invalid-flow-test")).version
+        await process_job(app.state.session_factory, version.job_id, org_id, HANDLERS, "training")
+        path = f"/api/v1/organizations/{org_id}/agents/{agent_id}/test-conversations"
+        body = {"version_id": str(version.id), "http_mode": "mock"}
+        assert (await stranger.post(path, json=body)).status_code == 404
+        response = await owner.post(path, json=body)
+        assert response.status_code == 409, response.text
+        error = response.json()["error"]
+        assert error["code"] == "invalid_version_flow"
+        assert any(item["code"] == "missing_output" for item in error["details"])
+        async with unit_of_work(app.state.session_factory, organization_id=org_id) as db:
+            assert not (await db.scalars(select(ConversationRecord))).all()
 
 
 async def test_real_model_chat_and_revoked_access_during_execution(app, monkeypatch):
