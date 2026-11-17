@@ -16,14 +16,10 @@ from dialogentis.jobs.models import Job
 from dialogentis.models import User
 from dialogentis.nlu.model_store import ModelIdentity
 from dialogentis.organizations import organization_context
-from dialogentis.runtime.conversations import (
-    commit_turn,
-    create_conversation,
-    read_conversation,
-    reserve_turn,
-)
+from dialogentis.runtime.conversations import create_conversation
 from dialogentis.runtime.core import RuntimeResult, TraceEvent
 from dialogentis.runtime.executor import ExecutionError, RuntimeExecutor
+from dialogentis.runtime.idempotency import Replay, complete_message, reserve_message
 from dialogentis.runtime.models import TestConversation
 from dialogentis.versions.models import AgentVersion
 from dialogentis.versions.prepare import version_status
@@ -38,6 +34,9 @@ class ChatResponse:
     trace: tuple[TraceEvent, ...] = field(repr=False)
     error_code: str | None = None
     credential: str | None = field(default=None, repr=False)
+    turn_id: UUID | None = None
+    replayed: bool = False
+    replay_available: bool = False
 
 
 @dataclass(frozen=True)
@@ -162,6 +161,8 @@ class TestChatService:
         revision: int,
         text: str,
         credential: str,
+        message_id: UUID,
+        idempotency_key: str,
     ) -> ChatResponse:
         if not isinstance(text, str) or not 1 <= len(text) <= 2000:
             raise ExecutionError("runtime_invalid_request")
@@ -175,48 +176,61 @@ class TestChatService:
                     self.factory, organization_id=org_id, user_id=user_id
                 ) as db:
                     user = await self._user(db, user_id)
-                    saved = await read_conversation(
-                        db, user, org_id, conversation_id, self.settings, credential
+                    reserved = await reserve_message(
+                        db,
+                        user,
+                        org_id,
+                        conversation_id,
+                        credential,
+                        revision,
+                        message_id,
+                        idempotency_key,
+                        text,
+                        self.settings,
                     )
-                    if saved.revision != revision:
-                        raise HTTPException(409, "Диалог изменился. Обновите состояние")
+                if isinstance(reserved, Replay):
+                    return ChatResponse(
+                        conversation_id,
+                        reserved.revision,
+                        reserved.status,
+                        reserved.messages,
+                        reserved.trace,
+                        reserved.error_code,
+                        turn_id=reserved.turn_id,
+                        replayed=True,
+                        replay_available=reserved.replay_available,
+                    )
+                async with unit_of_work(
+                    self.factory, organization_id=org_id, user_id=user_id
+                ) as db:
+                    user = await self._user(db, user_id)
                     row = await db.get(TestConversation, conversation_id)
-                    assert row is not None
+                    if row is None or row.created_by != user_id:
+                        raise HTTPException(404, "Диалог не найден")
                     bundle = await self._bundle(db, user, org_id, row.agent_id, row.version_id)
+                result = await self._execute("send", bundle, reserved.reservation.state, text)
                 async with unit_of_work(
                     self.factory, organization_id=org_id, user_id=user_id
                 ) as db:
-                    reservation = await reserve_turn(
+                    saved = await complete_message(
                         db,
                         await self._user(db, user_id),
                         org_id,
                         conversation_id,
-                        revision,
-                        self.settings,
                         credential,
-                    )
-                result = await self._execute("send", bundle, reservation.state, text)
-                async with unit_of_work(
-                    self.factory, organization_id=org_id, user_id=user_id
-                ) as db:
-                    saved = await commit_turn(
-                        db,
-                        await self._user(db, user_id),
-                        org_id,
-                        conversation_id,
-                        revision,
-                        reservation.token,
-                        result.state,
+                        reserved,
+                        result,
                         self.settings,
-                        credential,
                     )
                 return ChatResponse(
-                    saved.id,
+                    conversation_id,
                     saved.revision,
-                    result.state.status,
-                    result.messages,
-                    result.trace,
-                    result.error_code,
+                    saved.status,
+                    saved.messages,
+                    saved.trace,
+                    saved.error_code,
+                    turn_id=saved.turn_id,
+                    replay_available=saved.replay_available,
                 )
         except TimeoutError:
             raise ExecutionError("runtime_request_timeout") from None

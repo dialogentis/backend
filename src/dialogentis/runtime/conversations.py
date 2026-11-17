@@ -115,7 +115,13 @@ async def create_conversation(
 
 
 async def _locked_row(
-    db: AsyncSession, user: User, organization_id: UUID, conversation_id: UUID, credential: str
+    db: AsyncSession,
+    user: User,
+    organization_id: UUID,
+    conversation_id: UUID,
+    credential: str,
+    *,
+    allow_terminal: bool = False,
 ) -> tuple[TestConversation, datetime]:
     await _access(db, user, organization_id)
     row = await db.scalar(
@@ -139,7 +145,7 @@ async def _locked_row(
     now = await _now(db)
     if row.idle_expires_at <= now or row.absolute_expires_at <= now:
         raise HTTPException(410, "Срок диалога истёк")
-    if row.checkpoint is None:
+    if row.checkpoint is None and not allow_terminal:
         raise HTTPException(409, "Диалог завершён")
     return row, now
 

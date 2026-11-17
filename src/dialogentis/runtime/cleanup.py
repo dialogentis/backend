@@ -1,11 +1,13 @@
 """Bounded, tenant-scoped cleanup of expired test-conversation state."""
 
+from datetime import timedelta
 from uuid import UUID
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from dialogentis.runtime.models import TestConversation
+from dialogentis.runtime.receipt_models import RuntimeReceipt
 
 
 async def cleanup_expired_conversations(db: AsyncSession, organization_id: UUID) -> int:
@@ -23,6 +25,23 @@ async def cleanup_expired_conversations(db: AsyncSession, organization_id: UUID)
     ).all()
     if not ids:
         return 0
+    expiry_rows = (
+        await db.execute(
+            select(TestConversation.id, TestConversation.idle_expires_at).where(
+                TestConversation.id.in_(ids), TestConversation.organization_id == organization_id
+            )
+        )
+    ).all()
+    for conversation_id, expired_at in expiry_rows:
+        await db.execute(
+            update(RuntimeReceipt)
+            .where(
+                RuntimeReceipt.organization_id == organization_id,
+                RuntimeReceipt.conversation_id == conversation_id,
+                RuntimeReceipt.expires_at > expired_at + timedelta(hours=24),
+            )
+            .values(expires_at=expired_at + timedelta(hours=24))
+        )
     deleted = await db.scalars(
         delete(TestConversation)
         .where(
@@ -37,8 +56,6 @@ async def cleanup_expired_conversations(db: AsyncSession, organization_id: UUID)
 
 async def recover_abandoned_turns(db: AsyncSession, organization_id: UUID) -> int:
     """Fail expired reservations without replaying a possibly executed turn."""
-    from sqlalchemy import update
-
     ids = (
         await db.scalars(
             select(TestConversation.id)
@@ -54,6 +71,32 @@ async def recover_abandoned_turns(db: AsyncSession, organization_id: UUID) -> in
     ).all()
     if not ids:
         return 0
+    for conversation_id, token in (
+        await db.execute(
+            select(TestConversation.id, TestConversation.processing_token).where(
+                TestConversation.id.in_(ids), TestConversation.organization_id == organization_id
+            )
+        )
+    ).all():
+        await db.execute(
+            update(RuntimeReceipt)
+            .where(
+                RuntimeReceipt.organization_id == organization_id,
+                RuntimeReceipt.conversation_id == conversation_id,
+                RuntimeReceipt.status == "processing",
+                RuntimeReceipt.processing_token == token,
+            )
+            .values(status="unknown")
+        )
+        await db.execute(
+            update(RuntimeReceipt)
+            .where(
+                RuntimeReceipt.organization_id == organization_id,
+                RuntimeReceipt.conversation_id == conversation_id,
+                RuntimeReceipt.expires_at > func.now() + timedelta(hours=24),
+            )
+            .values(expires_at=func.now() + timedelta(hours=24))
+        )
     updated = await db.scalars(
         update(TestConversation)
         .where(
@@ -73,8 +116,6 @@ async def recover_abandoned_turns(db: AsyncSession, organization_id: UUID) -> in
 
 
 async def cleanup_expired_receipts(db: AsyncSession, organization_id: UUID) -> int:
-    from dialogentis.runtime.receipt_models import RuntimeReceipt
-
     ids = (
         await db.scalars(
             select(RuntimeReceipt.id)
