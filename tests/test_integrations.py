@@ -108,7 +108,7 @@ async def test_integrations_permissions_rotation_isolation_and_references(app):
                 {
                     "id": str(uuid4()),
                     "type": "http_action",
-                    "config": {"integration_id": f"URN:UUID:{integration_id}".upper()},
+                    "config": {"integration_id": str(integration_id).upper()},
                     "position": {"x": 0, "y": 0},
                 }
             )

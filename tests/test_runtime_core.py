@@ -129,8 +129,12 @@ def test_unsupported_blocks_and_missing_branches_fail_safely():
     config = empty_config()
     start = config["flow"]["nodes"][0]
     unsupported = node("http_action")
+    unsupported["config"] = {"integration_id": str(uuid4()), "path": "/orders"}
     config["flow"]["nodes"].append(unsupported)
     config["flow"]["edges"][0]["target"] = unsupported["id"]
+    end = config["flow"]["nodes"][3]
+    for handle in ("success", "http_error", "timeout", "invalid_response", "unknown_result"):
+        config["flow"]["edges"].append(edge(unsupported, end, handle))
     result = RuntimeEngine(version, config, lambda _: Prediction(version, None)).start()
     assert result.state.status == "failed" and result.error_code == "unsupported_in_stage"
     assert start["type"] == "start"

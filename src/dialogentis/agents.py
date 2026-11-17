@@ -223,6 +223,7 @@ def copy_config(config: dict) -> dict:
     )
     from dialogentis.datasets.schema import Dataset
     from dialogentis.drafts import DraftConfig
+    from dialogentis.http_action import HTTP_OUTPUTS, HttpActionDraftConfig, check_http_references
     from dialogentis.set_slot import SetSlotDraftConfig
     from dialogentis.slots import validate_slots
 
@@ -246,6 +247,7 @@ def copy_config(config: dict) -> dict:
         "ask_slot": {"slot_id", "prompt", "entity_id", "max_attempts", "checks"},
         "set_slot": {"slot_id", "operation", "source", "source_slot_id", "value"},
         "condition": {"branches"},
+        "http_action": set(HttpActionDraftConfig.model_fields),
     }
     if flow["layout"]:
         raise HTTPException(409, "Копирование этого черновика пока недоступно")
@@ -271,6 +273,7 @@ def copy_config(config: dict) -> dict:
         "switch_intent": {"fallback", *intent_ids},
         "ask_slot": {"success", "invalid", "exhausted"},
         "set_slot": {"next", "error"},
+        "http_action": set(HTTP_OUTPUTS),
     }
     conditions = {}
     for node in flow["nodes"]:
@@ -297,6 +300,12 @@ def copy_config(config: dict) -> dict:
     ):
         raise HTTPException(409, "Копирование этого сценария пока недоступно")
     for node in flow["nodes"]:
+        if node["type"] == "http_action":
+            try:
+                action = HttpActionDraftConfig.model_validate(node["config"])
+                check_http_references(action, {slot.id: slot for slot in slots})
+            except ValidationError, ValueError:
+                raise HTTPException(409, "Нельзя скопировать некорректный HTTP-запрос") from None
         if "text" in node["config"] and not isinstance(node["config"]["text"], str):
             raise HTTPException(409, "Нельзя скопировать некорректный текст блока")
         if "example" in node["config"] and (
@@ -360,6 +369,10 @@ def copy_config(config: dict) -> dict:
     clone["flow"]["flow_id"] = str(uuid4())
     for node in clone["flow"]["nodes"]:
         old_node_id = node["id"]
+        if node["type"] == "http_action":
+            for key in ("query", "body", "response_mapping"):
+                for name, reference in node["config"].get(key, {}).items():
+                    node["config"][key][name] = data_mapping["slots"][UUID(reference)]
         if node["type"] == "condition":
             for branch in node["config"]["branches"]:
                 branch["id"] = branch_mapping[old_node_id][str(UUID(branch["id"]))]

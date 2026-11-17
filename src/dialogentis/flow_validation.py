@@ -10,6 +10,7 @@ from dialogentis.conditions import ConditionConfig, validate_condition
 from dialogentis.datasets.schema import Entity, Intent
 from dialogentis.datasets.validation import Issue
 from dialogentis.flow_schema import Flow
+from dialogentis.http_action import HTTP_OUTPUTS, HttpActionConfig, check_http_references
 from dialogentis.set_slot import SetSlotConfig, check_set_config
 from dialogentis.slots import validate_slots
 from dialogentis.templates import TemplateError, parse_template
@@ -149,6 +150,7 @@ def validate_flow(config: dict) -> tuple[list[Issue], list[Issue]]:
             "fallback": set(),
             "ask_slot": {"success", "invalid", "exhausted"},
             "set_slot": {"next", "error"},
+            "http_action": set(HTTP_OUTPUTS),
         }
         if source_node.type == "condition":
             try:
@@ -199,11 +201,23 @@ def validate_flow(config: dict) -> tuple[list[Issue], list[Issue]]:
             "switch_intent": ("fallback",),
             "ask_slot": ("success", "invalid", "exhausted"),
             "set_slot": ("next", "error"),
+            "http_action": HTTP_OUTPUTS,
         }
         for handle in required.get(node.type, ()):
             if (node.id, handle) not in handles:
                 errors.append(
                     Issue(path, "missing_output", "Не подключён обязательный выход блока")
+                )
+        if node.type == "http_action":
+            try:
+                check_http_references(HttpActionConfig.model_validate(node.config), slot_by_id)
+            except ValidationError, ValueError:
+                errors.append(
+                    Issue(
+                        (*path, "config"),
+                        "invalid_http_action",
+                        "Проверьте настройки HTTP-запроса и параметры",
+                    )
                 )
         if node.type == "condition":
             try:
