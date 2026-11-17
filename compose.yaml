@@ -177,6 +177,13 @@ services:
       rabbitmq: {condition: service_healthy}
     volumes: [dispatcher-secret:/run/dialogentis-dispatcher:ro, artifacts:/app/artifacts]
     restart: unless-stopped
+  runtime-watchdog:
+    <<: *app
+    command: [uv, run, --locked, --no-dev, --no-sync, python, -m, dialogentis.runtime.watchdog]
+    depends_on:
+      deletion-replay: {condition: service_completed_successfully}
+    volumes: [dispatcher-secret:/run/dialogentis-dispatcher:ro]
+    restart: unless-stopped
   scheduler:
     <<: *app
     environment:

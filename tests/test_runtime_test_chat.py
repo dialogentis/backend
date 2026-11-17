@@ -1,6 +1,7 @@
 import asyncio
 import os
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
@@ -8,6 +9,7 @@ from fastapi import HTTPException
 from sqlalchemy import delete, select
 
 from dialogentis.db import unit_of_work
+from dialogentis.jobs.dispatcher import dispatcher_factory
 from dialogentis.jobs.tasks import process_job
 from dialogentis.jobs.training_tasks import HANDLERS
 from dialogentis.models import Membership, Organization
@@ -15,6 +17,7 @@ from dialogentis.runtime.executor import RuntimeExecutor
 from dialogentis.runtime.models import TestConversation as ConversationRecord
 from dialogentis.runtime.receipt_models import RuntimeReceipt
 from dialogentis.runtime.test_chat import TestChatService as ChatService
+from dialogentis.runtime.watchdog import recover_once
 from tests.test_auth import client_for
 from tests.test_exports import app as app
 from tests.test_versions import create_agent, populate, prepare
@@ -254,10 +257,13 @@ async def test_real_model_chat_and_revoked_access_during_execution(app, monkeypa
             )
             assert receipt is not None and receipt.status == "processing"
             row.processing_expires_at = datetime.now(UTC) - timedelta(seconds=1)
-        from dialogentis.runtime.cleanup import recover_abandoned_turns
-
+        dispatcher = dispatcher_factory(Path("/run/dialogentis-dispatcher/password"))
+        try:
+            assert await recover_once(app.state.session_factory, dispatcher) >= 1
+            assert await recover_once(app.state.session_factory, dispatcher) == 0
+        finally:
+            await dispatcher.kw["bind"].dispose()
         async with unit_of_work(app.state.session_factory, organization_id=org_id) as db:
-            assert await recover_abandoned_turns(db, org_id) == 1
             receipt = await db.scalar(
                 select(RuntimeReceipt).where(RuntimeReceipt.client_message_id == pending_id)
             )
