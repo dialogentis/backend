@@ -37,6 +37,7 @@ Permission = Literal[
     "manage_agents",
     "revoke_lease",
     "manage_settings",
+    "manage_integrations",
 ]
 ROLE_PERMISSIONS: dict[str, frozenset[Permission]] = {
     "owner": frozenset(
@@ -48,9 +49,18 @@ ROLE_PERMISSIONS: dict[str, frozenset[Permission]] = {
             "manage_agents",
             "revoke_lease",
             "manage_settings",
+            "manage_integrations",
         }
     ),
-    "admin": frozenset({"manage_members", "manage_agents", "revoke_lease", "manage_settings"}),
+    "admin": frozenset(
+        {
+            "manage_members",
+            "manage_agents",
+            "revoke_lease",
+            "manage_settings",
+            "manage_integrations",
+        }
+    ),
     "editor": frozenset({"manage_agents"}),
     "viewer": frozenset(),
 }

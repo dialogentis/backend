@@ -5,6 +5,7 @@ import dialogentis.artifact_records  # noqa: F401 - register artifact tables
 import dialogentis.auth.models  # noqa: F401 - register auth tables for metadata comparison
 import dialogentis.datasets.export_models  # noqa: F401 - register export tables
 import dialogentis.datasets.import_models  # noqa: F401 - register import tables
+import dialogentis.integrations.models  # noqa: F401 - register integration tables
 import dialogentis.jobs.models  # noqa: F401 - register job tables
 import dialogentis.organizations  # noqa: F401 - register organization tables
 import dialogentis.runtime.models  # noqa: F401 - register conversation tables
