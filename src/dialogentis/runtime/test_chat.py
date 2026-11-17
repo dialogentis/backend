@@ -20,6 +20,7 @@ from dialogentis.runtime.conversations import create_conversation
 from dialogentis.runtime.core import RuntimeResult, TraceEvent
 from dialogentis.runtime.executor import ExecutionError, RuntimeExecutor
 from dialogentis.runtime.idempotency import Replay, complete_message, reserve_message
+from dialogentis.runtime.limits import run_limited
 from dialogentis.runtime.models import TestConversation
 from dialogentis.versions.models import AgentVersion
 from dialogentis.versions.prepare import version_status
@@ -97,7 +98,32 @@ class TestChatService:
         )
         return _Bundle(identity, version.snapshot, version.config_hash, content)
 
-    async def _execute(self, action: str, bundle: _Bundle, state=None, text=None) -> RuntimeResult:
+    async def _execute(
+        self,
+        action: str,
+        user_id: UUID,
+        org_id: UUID,
+        agent_id: UUID,
+        version_id: UUID,
+        state=None,
+        text=None,
+    ) -> RuntimeResult:
+        async def work() -> RuntimeResult:
+            async with unit_of_work(self.factory, organization_id=org_id, user_id=user_id) as db:
+                bundle = await self._bundle(
+                    db, await self._user(db, user_id), org_id, agent_id, version_id
+                )
+            return await self._execute_in_slot(action, bundle, state, text)
+
+        try:
+            async with asyncio.timeout(20):
+                return await run_limited(self.factory, work)
+        except TimeoutError:
+            raise ExecutionError("runtime_timeout") from None
+
+    async def _execute_in_slot(
+        self, action: str, bundle: _Bundle, state=None, text=None
+    ) -> RuntimeResult:
         if action == "start":
             return await self.executor.execute(
                 action="start",
@@ -123,13 +149,7 @@ class TestChatService:
     ) -> ChatResponse:
         try:
             async with asyncio.timeout(25):
-                async with unit_of_work(
-                    self.factory, organization_id=org_id, user_id=user_id
-                ) as db:
-                    bundle = await self._bundle(
-                        db, await self._user(db, user_id), org_id, agent_id, version_id
-                    )
-                result = await self._execute("start", bundle)
+                result = await self._execute("start", user_id, org_id, agent_id, version_id)
                 async with unit_of_work(
                     self.factory, organization_id=org_id, user_id=user_id
                 ) as db:
@@ -237,12 +257,14 @@ class TestChatService:
                 async with unit_of_work(
                     self.factory, organization_id=org_id, user_id=user_id
                 ) as db:
-                    user = await self._user(db, user_id)
+                    await self._user(db, user_id)
                     row = await db.get(TestConversation, conversation_id)
                     if row is None or row.created_by != user_id:
                         raise HTTPException(404, "Диалог не найден")
-                    bundle = await self._bundle(db, user, org_id, row.agent_id, row.version_id)
-                result = await self._execute("send", bundle, reserved.reservation.state, text)
+                    agent_id, version_id = row.agent_id, row.version_id
+                result = await self._execute(
+                    "send", user_id, org_id, agent_id, version_id, reserved.reservation.state, text
+                )
                 async with unit_of_work(
                     self.factory, organization_id=org_id, user_id=user_id
                 ) as db:
