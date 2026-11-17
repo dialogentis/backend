@@ -40,9 +40,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        yield
-        if factory:
-            await factory.kw["bind"].dispose()
+        try:
+            yield
+        finally:
+            try:
+                if app.state.test_chat_service is not None:
+                    await app.state.test_chat_service.shutdown()
+            finally:
+                if factory:
+                    await factory.kw["bind"].dispose()
 
     app = FastAPI(
         title="Dialogentis API",

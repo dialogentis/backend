@@ -59,6 +59,17 @@ class TestChatService:
         self.settings = settings
         self.executor = executor
         self._pending: set[asyncio.Task[ChatResponse]] = set()
+        self._closing = False
+
+    async def shutdown(self, grace_period: float = 30) -> None:
+        self._closing = True
+        if not self._pending:
+            return
+        _, pending = await asyncio.wait(self._pending, timeout=grace_period)
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
 
     async def _user(self, db: AsyncSession, user_id: UUID) -> User:
         user = await db.get(User, user_id)
@@ -147,6 +158,8 @@ class TestChatService:
     async def start(
         self, user_id: UUID, org_id: UUID, agent_id: UUID, version_id: UUID
     ) -> ChatResponse:
+        if self._closing:
+            raise HTTPException(503, "Тестовый чат завершает работу")
         try:
             async with asyncio.timeout(25):
                 result = await self._execute("start", user_id, org_id, agent_id, version_id)
@@ -185,6 +198,8 @@ class TestChatService:
         message_id: UUID,
         idempotency_key: str,
     ) -> ChatResponse:
+        if self._closing:
+            raise HTTPException(503, "Тестовый чат завершает работу")
         task = asyncio.create_task(
             self._send(
                 user_id,
