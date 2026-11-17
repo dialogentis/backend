@@ -26,6 +26,9 @@ from dialogentis.deletions import router as deletions_router
 from dialogentis.drafts import router as drafts_router
 from dialogentis.flow_routes import router as flow_router
 from dialogentis.organizations import router as organizations_router
+from dialogentis.runtime.executor import RuntimeExecutor
+from dialogentis.runtime.routes import router as test_chat_router
+from dialogentis.runtime.test_chat import TestChatService
 from dialogentis.versions.routes import router as versions_router
 
 
@@ -54,6 +57,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     app.state.settings = config
     app.state.session_factory = factory
+    app.state.test_chat_service = (
+        TestChatService(factory, config, RuntimeExecutor()) if factory else None
+    )
     app.state.entity_preview_slots = asyncio.Semaphore(4)
     app.add_middleware(BodyLimitMiddleware, max_bytes=config.max_body_bytes)
     app.include_router(auth_router)
@@ -66,6 +72,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(exports_router)
     app.include_router(imports_router)
     app.include_router(versions_router)
+    app.include_router(test_chat_router)
 
     @app.middleware("http")
     async def request_context(request: Request, call_next: Callable[[Request], Awaitable]):

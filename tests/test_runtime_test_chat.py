@@ -129,6 +129,71 @@ async def test_real_model_chat_and_revoked_access_during_execution(app, monkeypa
                 and "🛸🛸".encode() not in row.checkpoint
             )
 
+        base = f"/api/v1/organizations/{org_id}"
+        chat_path = f"{base}/agents/{agent_id}/test-conversations"
+        body = {"version_id": str(version_id), "http_mode": "mock"}
+        assert (
+            await viewer.post(chat_path, json=body, headers={"X-CSRF-Token": "bad"})
+        ).status_code == 403
+        assert (await viewer.post(chat_path, json={**body, "http_mode": "live"})).status_code == 422
+        created = await viewer.post(chat_path, json=body)
+        assert created.status_code == 201, created.text
+        chat = created.json()
+        assert chat["status"] == "waiting_input" and chat["revision"] == 1
+        message_path = f"{base}/test-conversations/{chat['conversation_id']}/messages"
+        headers = {
+            "X-Conversation-Token": chat["conversation_token"],
+            "Idempotency-Key": "http-message",
+        }
+        message = {"client_message_id": str(uuid4()), "revision": 1, "text": "🛸🛸"}
+        assert (await owner.post(message_path, json=message, headers=headers)).status_code == 404
+        assert (
+            await viewer.post(
+                message_path, json=message, headers={**headers, "X-Conversation-Token": "x" * 43}
+            )
+        ).status_code == 404
+        response = await viewer.post(message_path, json=message, headers=headers)
+        assert response.status_code == 200, response.text
+        replay_response = await viewer.post(message_path, json=message, headers=headers)
+        assert replay_response.status_code == 200
+        assert replay_response.json()["replayed"]
+        assert replay_response.json()["messages"] == response.json()["messages"]
+        assert (
+            await viewer.post(message_path, json={**message, "text": "другое"}, headers=headers)
+        ).status_code == 409
+
+        http_ready, http_release = asyncio.Event(), asyncio.Event()
+        api_executor = app.state.test_chat_service.executor
+        execute_http = api_executor.execute
+
+        async def pause_http(**kwargs):
+            http_ready.set()
+            await http_release.wait()
+            return await execute_http(**kwargs)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(api_executor, "execute", pause_http)
+            next_message = {"client_message_id": str(uuid4()), "revision": 2, "text": "🧩🧩"}
+            next_headers = {**headers, "Idempotency-Key": "next-http-message"}
+            first_http = asyncio.create_task(
+                viewer.post(message_path, json=next_message, headers=next_headers)
+            )
+            try:
+                await asyncio.wait_for(http_ready.wait(), 10)
+                concurrent = await asyncio.wait_for(
+                    viewer.post(
+                        message_path,
+                        json={**next_message, "client_message_id": str(uuid4())},
+                        headers={**headers, "Idempotency-Key": "concurrent-http-message"},
+                    ),
+                    3,
+                )
+                assert concurrent.status_code == 409
+                assert concurrent.headers["Retry-After"] == "1"
+            finally:
+                http_release.set()
+            assert (await first_http).status_code == 200
+
         async with unit_of_work(app.state.session_factory, organization_id=org_id) as db:
             org = await db.get(Organization, org_id)
             assert org is not None
