@@ -15,6 +15,7 @@ from dialogentis.deletion_worker import purge_tenant
 from dialogentis.jobs.dispatcher import dispatcher_factory
 from dialogentis.jobs.maintenance import reconcile_once
 from dialogentis.jobs.models import OutboxEvent
+from dialogentis.models import Organization
 from dialogentis.runtime.receipt_models import RuntimeReceipt
 from dialogentis.runtime.receipts import ReceiptIdentity, ReceiptPayload, open_receipt, seal_receipt
 from tests.test_auth import client_for
@@ -99,11 +100,24 @@ async def test_receipt_isolation_uniqueness_retention_and_cleanup(app):
                 row = await db.get(RuntimeReceipt, turn_id)
                 assert row is not None
                 row.expires_at = now - timedelta(seconds=1)
+                organization = await db.get(Organization, org_id)
+                assert organization is not None
+                organization.retention_days = 1
+                old_id = uuid4()
+                db.add(
+                    make(
+                        id=old_id,
+                        idempotency_key_hash="f" * 64,
+                        created_at=now - timedelta(days=2),
+                    )
+                )
             assert await reconcile_once(
                 app.state.session_factory, dispatcher, datetime(2042, 1, 1, tzinfo=UTC), frozenset()
             )
             async with unit_of_work(app.state.session_factory, organization_id=org_id) as db:
                 assert await db.get(RuntimeReceipt, turn_id) is None
+                old = await db.get(RuntimeReceipt, old_id)
+                assert old is not None and old.encrypted_response is None
                 db.add(make(idempotency_key_hash="e" * 64))
             async with unit_of_work(app.state.session_factory, organization_id=org_id) as db:
                 await purge_tenant(db, org_id)

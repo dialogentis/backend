@@ -1,21 +1,31 @@
 import json
 import secrets
 from datetime import UTC, datetime, timedelta
-from typing import Literal
+from typing import Annotated, Literal
 from uuid import UUID, uuid4
 
 from cryptography.fernet import Fernet
-from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, EmailStr, Field
-from sqlalchemy import DateTime, ForeignKey, ForeignKeyConstraint, String, select, text
+from fastapi import APIRouter, Header, HTTPException, Request, Response
+from pydantic import BaseModel, EmailStr, Field, StrictBool, StrictInt, StrictStr, model_validator
+from sqlalchemy import (
+    DateTime,
+    ForeignKey,
+    ForeignKeyConstraint,
+    String,
+    func,
+    select,
+    text,
+    update,
+)
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Mapped, mapped_column
 
 from dialogentis.auth.models import EmailOutbox
 from dialogentis.auth.security import VerifiedUser, check_password, digest, rate_limit
-from dialogentis.contracts import CursorPage, InputModel
+from dialogentis.contracts import CursorPage, InputModel, revision_etag
 from dialogentis.dependencies import Database
 from dialogentis.models import Base, Membership, Organization, User
+from dialogentis.runtime.receipt_models import RuntimeReceipt
 
 router = APIRouter(prefix="/api/v1", tags=["organizations"])
 Role = Literal["admin", "editor", "viewer"]
@@ -26,6 +36,7 @@ Permission = Literal[
     "delete_organization",
     "manage_agents",
     "revoke_lease",
+    "manage_settings",
 ]
 ROLE_PERMISSIONS: dict[str, frozenset[Permission]] = {
     "owner": frozenset(
@@ -36,9 +47,10 @@ ROLE_PERMISSIONS: dict[str, frozenset[Permission]] = {
             "delete_organization",
             "manage_agents",
             "revoke_lease",
+            "manage_settings",
         }
     ),
-    "admin": frozenset({"manage_members", "manage_agents", "revoke_lease"}),
+    "admin": frozenset({"manage_members", "manage_agents", "revoke_lease", "manage_settings"}),
     "editor": frozenset({"manage_agents"}),
     "viewer": frozenset(),
 }
@@ -83,6 +95,24 @@ class OrganizationInput(InputModel):
     slug: str = Field(pattern=r"^[a-z][a-z0-9-]{1,63}$")
 
 
+class OrganizationPatch(InputModel):
+    name: StrictStr | None = Field(default=None, min_length=1, max_length=120)
+    history_retention_days: StrictInt | None = Field(default=None, ge=1, le=30)
+    store_message_text: StrictBool | None = None
+    purge_existing_text: StrictBool = False
+
+    @model_validator(mode="after")
+    def validate_changes(self):
+        if not self.model_fields_set or any(
+            key in self.model_fields_set and getattr(self, key) is None
+            for key in ("name", "history_retention_days", "store_message_text")
+        ):
+            raise ValueError("Invalid organization settings")
+        if self.name is not None and not self.name.strip():
+            raise ValueError("Invalid organization name")
+        return self
+
+
 class RoleInput(InputModel):
     role: Role
 
@@ -106,6 +136,7 @@ class OrganizationView(BaseModel):
     slug: str
     history_retention_days: int
     store_message_text: bool
+    settings_revision: int
     role: Literal["owner", "admin", "editor", "viewer"]
 
 
@@ -141,6 +172,7 @@ def org_json(org: Organization) -> dict:
         "slug": org.slug,
         "history_retention_days": org.retention_days,
         "store_message_text": org.store_message_text,
+        "settings_revision": org.settings_revision,
     }
 
 
@@ -230,11 +262,60 @@ async def create_organization(body: OrganizationInput, user: VerifiedUser, db: D
 
 
 @router.get("/organizations/{org_id}", response_model=OrganizationView)
-async def get_organization(org_id: UUID, user: VerifiedUser, db: Database):
+async def get_organization(org_id: UUID, user: VerifiedUser, db: Database, response: Response):
     membership = await organization_context(db, user, org_id)
     org = await db.get(Organization, org_id)
     if org is None:
         raise HTTPException(404, "Пространство не найдено")
+    response.headers["ETag"] = revision_etag(org.settings_revision)
+    return {**org_json(org), "role": membership.role}
+
+
+@router.patch("/organizations/{org_id}", response_model=OrganizationView)
+async def update_organization(
+    org_id: UUID,
+    body: OrganizationPatch,
+    user: VerifiedUser,
+    db: Database,
+    response: Response,
+    if_match: Annotated[str | None, Header(alias="If-Match")] = None,
+):
+    membership = await organization_context(db, user, org_id, "manage_settings", lock=True)
+    org = await db.get(Organization, org_id)
+    assert org is not None
+    if if_match is None:
+        raise HTTPException(428, "Укажите версию настроек")
+    if if_match != revision_etag(org.settings_revision):
+        raise HTTPException(412, "Настройки изменились. Обновите страницу")
+    if body.name is not None:
+        org.name = body.name.strip()
+    if body.history_retention_days is not None:
+        org.retention_days = body.history_retention_days
+    if body.store_message_text is not None:
+        org.store_message_text = body.store_message_text
+    if body.purge_existing_text:
+        await db.execute(
+            update(RuntimeReceipt)
+            .where(
+                RuntimeReceipt.organization_id == org_id,
+                RuntimeReceipt.encrypted_response.is_not(None),
+            )
+            .values(encrypted_response=None)
+        )
+    elif body.history_retention_days is not None:
+        await db.execute(
+            update(RuntimeReceipt)
+            .where(
+                RuntimeReceipt.organization_id == org_id,
+                RuntimeReceipt.encrypted_response.is_not(None),
+                RuntimeReceipt.created_at <= func.now() - timedelta(days=org.retention_days),
+            )
+            .values(encrypted_response=None)
+        )
+    org.settings_revision += 1
+    audit(db, org_id, user, "organization.settings_changed", org_id)
+    await db.flush()
+    response.headers["ETag"] = revision_etag(org.settings_revision)
     return {**org_json(org), "role": membership.role}
 
 

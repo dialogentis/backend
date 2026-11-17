@@ -6,6 +6,7 @@ from uuid import UUID
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from dialogentis.models import Organization
 from dialogentis.runtime.models import TestConversation
 from dialogentis.runtime.receipt_models import RuntimeReceipt
 
@@ -116,6 +117,20 @@ async def recover_abandoned_turns(db: AsyncSession, organization_id: UUID) -> in
 
 
 async def cleanup_expired_receipts(db: AsyncSession, organization_id: UUID) -> int:
+    organization = await db.scalar(
+        select(Organization).where(Organization.id == organization_id).with_for_update()
+    )
+    if organization is None:
+        return 0
+    await db.execute(
+        update(RuntimeReceipt)
+        .where(
+            RuntimeReceipt.organization_id == organization_id,
+            RuntimeReceipt.encrypted_response.is_not(None),
+            RuntimeReceipt.created_at <= func.now() - timedelta(days=organization.retention_days),
+        )
+        .values(encrypted_response=None)
+    )
     ids = (
         await db.scalars(
             select(RuntimeReceipt.id)

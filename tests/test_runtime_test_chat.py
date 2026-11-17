@@ -3,7 +3,7 @@ import os
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from fastapi import HTTPException
@@ -13,7 +13,7 @@ from dialogentis.db import unit_of_work
 from dialogentis.jobs.dispatcher import dispatcher_factory
 from dialogentis.jobs.tasks import process_job
 from dialogentis.jobs.training_tasks import HANDLERS
-from dialogentis.models import AgentDraft, Membership, Organization
+from dialogentis.models import AgentDraft, Membership
 from dialogentis.runtime.executor import RuntimeExecutor
 from dialogentis.runtime.models import TestConversation as ConversationRecord
 from dialogentis.runtime.receipt_models import RuntimeReceipt
@@ -220,10 +220,45 @@ async def test_real_model_chat_and_revoked_access_during_execution(app, monkeypa
                 http_release.set()
             assert (await first_http).status_code == 200
 
+        settings_url = f"/api/v1/organizations/{org_id}"
+        settings = await owner.get(settings_url)
+        etag = settings.headers["etag"]
         async with unit_of_work(app.state.session_factory, organization_id=org_id) as db:
-            org = await db.get(Organization, org_id)
-            assert org is not None
-            org.store_message_text = False
+            aged = await db.get(RuntimeReceipt, UUID(response.json()["turn_id"]))
+            assert aged is not None and aged.encrypted_response is not None
+            aged.created_at = datetime.now(UTC) - timedelta(days=2)
+        shorter = await owner.patch(
+            settings_url, json={"history_retention_days": 1}, headers={"If-Match": etag}
+        )
+        assert shorter.status_code == 200 and shorter.json()["history_retention_days"] == 1
+        async with unit_of_work(app.state.session_factory, organization_id=org_id) as db:
+            aged = await db.get(RuntimeReceipt, UUID(response.json()["turn_id"]))
+            assert aged is not None and aged.encrypted_response is None
+        etag = shorter.headers["etag"]
+        change = {"store_message_text": False, "purge_existing_text": True}
+        assert (
+            await viewer.patch(settings_url, json=change, headers={"If-Match": etag})
+        ).status_code == 403
+        assert (await owner.patch(settings_url, json=change)).status_code == 428
+        updated = await owner.patch(settings_url, json=change, headers={"If-Match": etag})
+        assert updated.status_code == 200 and not updated.json()["store_message_text"]
+        assert (
+            await owner.patch(settings_url, json=change, headers={"If-Match": etag})
+        ).status_code == 412
+        hidden = await service.send(
+            viewer_id,
+            org_id,
+            started.conversation_id,
+            1,
+            "🛸🛸",
+            started.credential,
+            message_id,
+            "first-key",
+        )
+        assert hidden.replayed and not hidden.replay_available and not hidden.messages
+        async with unit_of_work(app.state.session_factory, organization_id=org_id) as db:
+            original = await db.get(RuntimeReceipt, result.turn_id)
+            assert original is not None and original.encrypted_response is None
         private = await service.start(viewer_id, org_id, agent_id, version_id)
         assert private.credential is not None
         private_message = uuid4()
@@ -259,10 +294,27 @@ async def test_real_model_chat_and_revoked_access_during_execution(app, monkeypa
             )
             assert receipt is not None and receipt.encrypted_response is None
 
-        async with unit_of_work(app.state.session_factory, organization_id=org_id) as db:
-            org = await db.get(Organization, org_id)
-            assert org is not None
-            org.store_message_text = True
+        restored = await owner.patch(
+            settings_url,
+            json={"store_message_text": True},
+            headers={"If-Match": updated.headers["etag"]},
+        )
+        assert restored.status_code == 200 and restored.json()["store_message_text"]
+        still_hidden = await service.send(
+            viewer_id,
+            org_id,
+            started.conversation_id,
+            1,
+            "🛸🛸",
+            started.credential,
+            message_id,
+            "first-key",
+        )
+        assert (
+            still_hidden.replayed
+            and not still_hidden.replay_available
+            and not still_hidden.messages
+        )
         failed_message = uuid4()
 
         def fail_to_seal(*args, **kwargs):
