@@ -10,6 +10,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from dialogentis.config import Settings
+from dialogentis.http_action import MockIntegration
 from dialogentis.nlu.model_store import ModelIdentity
 from dialogentis.runtime.child import MAX_REQUEST, MAX_RESPONSE
 from dialogentis.runtime.core import RuntimeResult, RuntimeState, TraceEvent
@@ -56,6 +57,7 @@ class RuntimeExecutor:
         settings: Settings,
         state: RuntimeState | None = None,
         text: str | None = None,
+        mock_integrations: list[MockIntegration] | None = None,
     ) -> RuntimeResult:
         if settings.encryption_key is None:
             raise ExecutionError("runtime_key_unavailable")
@@ -90,6 +92,11 @@ class RuntimeExecutor:
                     "artifact_id": str(identity.artifact_id),
                     "state": state.model_dump(mode="json") if state is not None else None,
                     "text": text,
+                    "mock_integrations": (
+                        [item.model_dump(mode="json") for item in mock_integrations]
+                        if mock_integrations is not None
+                        else None
+                    ),
                 },
                 ensure_ascii=False,
                 allow_nan=False,

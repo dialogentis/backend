@@ -16,6 +16,7 @@ from dialogentis.datasets.schema import Entity, Intent
 from dialogentis.datasets.validation import normalize_example
 from dialogentis.flow_schema import Flow, FlowNode
 from dialogentis.flow_validation import validate_flow
+from dialogentis.http_action import HttpActionConfig, MockIntegration, mock_http_action
 from dialogentis.runtime.slot_values import SlotValueError, parse_slot_value, valid_value
 from dialogentis.set_slot import SetSlotConfig
 from dialogentis.slots import Slot, validate_slots
@@ -120,7 +121,14 @@ def semantic_hash(
 
 
 class RuntimeEngine:
-    def __init__(self, version_id: UUID, config: dict, predict: Callable[[str], Prediction]):
+    def __init__(
+        self,
+        version_id: UUID,
+        config: dict,
+        predict: Callable[[str], Prediction],
+        *,
+        mock_integrations: list[MockIntegration] | None = None,
+    ):
         errors, _ = validate_flow(config)
         if errors:
             raise RuntimeFault("invalid_flow")
@@ -153,6 +161,14 @@ class RuntimeEngine:
             for node in self._flow.nodes
             if node.type == "set_slot"
         }
+        self._http_actions = {
+            node.id: HttpActionConfig.model_validate(node.config)
+            for node in self._flow.nodes
+            if node.type == "http_action"
+        }
+        self._mock_integrations = (
+            {item.id: item for item in mock_integrations} if mock_integrations is not None else None
+        )
         self._conditions = {
             node.id: ConditionConfig.model_validate(node.config)
             for node in self._flow.nodes
@@ -242,6 +258,7 @@ class RuntimeEngine:
         messages: list[str] = []
         trace: list[TraceEvent] = []
         transitions = 0
+        http_actions = 0
         deadline = monotonic() + MAX_SECONDS
         original_text = text
         last_prediction: Prediction | None = None
@@ -396,6 +413,18 @@ class RuntimeEngine:
                 elif node.type == "condition":
                     handle = choose_branch(self._conditions[node.id], self._slot_by_id, values)
                     node_id = move(node, handle)
+                elif node.type == "http_action" and self._mock_integrations is not None:
+                    http_actions += 1
+                    if http_actions > 3:
+                        raise RuntimeFault("http_action_limit")
+                    action = self._http_actions[node.id]
+                    outcome = mock_http_action(
+                        action,
+                        self._mock_integrations.get(action.integration_id),
+                        self._slot_by_id,
+                        values,
+                    )
+                    node_id = move(node, outcome)
                 elif node.type == "set_slot":
                     assignment = self._sets[node.id]
                     slot = self._slot_by_id[assignment.slot_id]

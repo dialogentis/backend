@@ -4,12 +4,20 @@ import json
 from typing import Literal
 from uuid import UUID
 
-from pydantic import ConfigDict, Field, JsonValue, StrictStr, ValidationError, field_validator
+from pydantic import (
+    ConfigDict,
+    Field,
+    JsonValue,
+    StrictBool,
+    StrictStr,
+    ValidationError,
+    field_validator,
+)
 
 from dialogentis.contracts import InputModel
 from dialogentis.datasets.validation import Issue
 from dialogentis.flow_schema import Flow
-from dialogentis.integrations.schema import Method, safe_path
+from dialogentis.integrations.schema import Method, path_allowed, safe_path
 from dialogentis.slots import Slot
 
 HTTP_OUTPUTS = ("success", "http_error", "timeout", "invalid_response", "unknown_result")
@@ -59,6 +67,56 @@ class HttpActionDraftConfig(InputModel):
 class HttpActionConfig(HttpActionDraftConfig):
     integration_id: UUID
     path: StrictStr = Field(min_length=1)
+
+
+class MockIntegration(InputModel):
+    id: UUID
+    enabled: StrictBool
+    methods: list[Method] = Field(max_length=5)
+    paths: list[StrictStr] = Field(max_length=100)
+    response_fields: list[StrictStr] = Field(max_length=100)
+
+
+def mock_http_action(
+    config: HttpActionConfig,
+    integration: MockIntegration | None,
+    slots: dict[UUID, Slot],
+    values: dict,
+) -> str:
+    if integration is None or not integration.enabled or config.method not in integration.methods:
+        return "http_error"
+    try:
+        if not path_allowed(config.path, integration.paths):
+            return "http_error"
+    except ValueError, UnicodeError:
+        return "http_error"
+    if any(
+        values.get(slots[slot_id].code) is None
+        for m in (config.query, config.body)
+        for slot_id in m.values()
+    ):
+        return "http_error"
+    if config.mock_outcome != "success":
+        return config.mock_outcome
+    mapped = {}
+    for field, slot_id in config.response_mapping.items():
+        if field not in integration.response_fields:
+            return "invalid_response"
+        value = config.mock_response
+        for part in field.split("."):
+            if not part or not isinstance(value, dict) or part not in value:
+                return "invalid_response"
+            value = value[part]
+        slot = slots[slot_id]
+        try:
+            if isinstance(value, str):
+                value.encode("utf-8")
+            Slot.model_validate({**slot.model_dump(), "default": value})
+        except ValidationError, UnicodeError:
+            return "invalid_response"
+        mapped[slot.code] = value
+    values.update(mapped)
+    return "success"
 
 
 def check_http_references(config: HttpActionDraftConfig, slots: dict[UUID, Slot]) -> None:

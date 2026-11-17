@@ -18,7 +18,7 @@ from uuid import UUID
 
 import httpcore
 
-from dialogentis.integrations.schema import IntegrationInput, safe_base_url, safe_path
+from dialogentis.integrations.schema import IntegrationInput, path_allowed, safe_base_url, safe_path
 
 MAX_BODY = 256 * 1024
 MAX_QUERY = 8192
@@ -144,10 +144,7 @@ def _request_url(config: IntegrationInput, method: str, path: str, query: dict[s
     try:
         base = safe_base_url(config.base_url)
         decoded = unquote(safe_path(path), errors="strict")
-        allowed = [unquote(safe_path(item), errors="strict") for item in config.paths]
-        if not any(
-            decoded == item or (item.endswith("/") and decoded.startswith(item)) for item in allowed
-        ):
+        if not path_allowed(path, config.paths):
             raise IntegrationRequestError("request_not_allowed")
         if (
             not isinstance(query, dict)

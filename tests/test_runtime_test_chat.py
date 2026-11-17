@@ -10,6 +10,7 @@ from fastapi import HTTPException
 from sqlalchemy import delete, select
 
 from dialogentis.db import unit_of_work
+from dialogentis.http_action import HTTP_OUTPUTS
 from dialogentis.jobs.dispatcher import dispatcher_factory
 from dialogentis.jobs.tasks import process_job
 from dialogentis.jobs.training_tasks import HANDLERS
@@ -29,6 +30,81 @@ pytestmark = [
         os.environ.get("RUN_INTEGRATION") != "1", reason="Run with Compose test profile"
     ),
 ]
+
+
+async def test_mock_http_action_uses_organization_policy_in_real_test_chat(app):
+    async with client_for(app) as owner:
+        user_id, org_id, agent_id = await create_agent(app, owner)
+        await populate(app, org_id, agent_id)
+        integrations = f"/api/v1/organizations/{org_id}/integrations"
+        created = await owner.post(
+            integrations,
+            json={
+                "name": "Orders",
+                "base_url": "https://orders.example.com",
+                "methods": ["GET"],
+                "paths": ["/orders/"],
+                "response_fields": ["order.status"],
+                "secret": "private-token",
+            },
+        )
+        assert created.status_code == 201
+        async with unit_of_work(app.state.session_factory, organization_id=org_id) as db:
+            draft = await db.scalar(select(AgentDraft).where(AgentDraft.agent_id == agent_id))
+            assert draft is not None
+            config = deepcopy(draft.configuration)
+            slot_id, action_id, say_id = (str(uuid4()) for _ in range(3))
+            config["slots"] = [{"id": slot_id, "code": "status", "sensitive": True}]
+            action = {
+                "id": action_id,
+                "type": "http_action",
+                "position": {"x": 0, "y": 0},
+                "config": {
+                    "integration_id": created.json()["id"],
+                    "path": "/orders/123",
+                    "response_mapping": {"order.status": slot_id},
+                    "mock_response": {"order": {"status": "готов"}},
+                },
+            }
+            say = {
+                "id": say_id,
+                "type": "say",
+                "position": {"x": 0, "y": 0},
+                "config": {"text": "Статус: {{status}}"},
+            }
+            flow = config["flow"]
+            flow["nodes"] += [action, say]
+            flow["edges"][0]["target"] = action_id
+            end_id, switch_id = flow["nodes"][3]["id"], flow["nodes"][1]["id"]
+            flow["edges"] += [
+                {
+                    "id": str(uuid4()),
+                    "source": action_id,
+                    "source_handle": output,
+                    "target": say_id if output == "success" else end_id,
+                }
+                for output in HTTP_OUTPUTS
+            ]
+            flow["edges"].append(
+                {"id": str(uuid4()), "source": say_id, "source_handle": "next", "target": switch_id}
+            )
+            draft.configuration = config
+        version = (await prepare(app, user_id, org_id, agent_id, 1, "http-mock-test")).version
+        await process_job(app.state.session_factory, version.job_id, org_id, HANDLERS, "training")
+        service = ChatService(app.state.session_factory, app.state.settings, RuntimeExecutor())
+        result = await service.start(user_id, org_id, agent_id, version.id)
+        assert result.status == "waiting_input" and result.messages == ("Статус: готов",)
+        assert "готов" not in repr(result.trace) and "private-token" not in repr(result)
+        disabled = await owner.patch(
+            f"{integrations}/{created.json()['id']}",
+            json={"enabled": False},
+            headers={"If-Match": created.headers["etag"]},
+        )
+        assert disabled.status_code == 200
+        denied = await service.start(user_id, org_id, agent_id, version.id)
+        assert denied.status == "completed" and any(
+            event.output == "http_error" for event in denied.trace
+        )
 
 
 async def test_start_reports_errors_in_the_selected_version(app):

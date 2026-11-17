@@ -26,6 +26,14 @@ def safe_path(value: str) -> str:
     return value
 
 
+def path_allowed(path: str, allowed_paths: list[str]) -> bool:
+    decoded = unquote(safe_path(path), errors="strict")
+    allowed = [unquote(safe_path(item), errors="strict") for item in allowed_paths]
+    return any(
+        decoded == item or (item.endswith("/") and decoded.startswith(item)) for item in allowed
+    )
+
+
 def safe_base_url(value: str) -> str:
     if len(value) > 2048 or any(ord(char) <= 32 or ord(char) == 127 for char in value):
         raise ValueError("Invalid URL")

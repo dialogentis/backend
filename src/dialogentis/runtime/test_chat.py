@@ -14,6 +14,8 @@ from dialogentis.config import Settings
 from dialogentis.datasets.validation import Issue
 from dialogentis.db import unit_of_work
 from dialogentis.flow_validation import validate_flow
+from dialogentis.http_action import HttpActionConfig, MockIntegration
+from dialogentis.integrations.models import Integration
 from dialogentis.jobs.models import Job
 from dialogentis.models import User
 from dialogentis.nlu.model_store import ModelIdentity
@@ -48,6 +50,7 @@ class _Bundle:
     snapshot: dict = field(repr=False)
     config_hash: str
     model: bytes = field(repr=False)
+    mock_integrations: list[MockIntegration] = field(repr=False)
 
 
 class InvalidVersionFlow(ValueError):
@@ -118,7 +121,24 @@ class TestChatService:
             max_bytes=self.settings.max_model_artifact_bytes,
             expected_kind="model",
         )
-        return _Bundle(identity, version.snapshot, version.config_hash, content)
+        integration_ids = {
+            HttpActionConfig.model_validate(node["config"]).integration_id
+            for node in version.snapshot["config"]["flow"]["nodes"]
+            if node["type"] == "http_action"
+        }
+        records = (
+            await db.execute(
+                select(
+                    Integration.id,
+                    Integration.enabled,
+                    Integration.methods,
+                    Integration.paths,
+                    Integration.response_fields,
+                ).where(Integration.organization_id == org_id, Integration.id.in_(integration_ids))
+            )
+        ).all()
+        integrations = [MockIntegration.model_validate(row._mapping) for row in records]
+        return _Bundle(identity, version.snapshot, version.config_hash, content, integrations)
 
     async def _execute(
         self,
@@ -154,6 +174,7 @@ class TestChatService:
                 identity=bundle.identity,
                 model=bundle.model,
                 settings=self.settings,
+                mock_integrations=bundle.mock_integrations,
             )
         return await self.executor.execute(
             action="send",
@@ -164,6 +185,7 @@ class TestChatService:
             settings=self.settings,
             state=state,
             text=text,
+            mock_integrations=bundle.mock_integrations,
         )
 
     async def start(

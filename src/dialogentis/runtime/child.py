@@ -11,6 +11,7 @@ from uuid import UUID
 from pydantic import SecretStr
 
 from dialogentis.config import Settings
+from dialogentis.http_action import MockIntegration
 from dialogentis.nlu.model_store import ModelIdentity, unpack_model
 from dialogentis.runtime.core import RuntimeEngine, RuntimeState
 from dialogentis.runtime.nlu import nlu_predictor
@@ -56,7 +57,17 @@ def main() -> None:
         max_model_artifact_bytes=model_limit,
     )
     adapter = unpack_model(model, identity, settings)
-    engine = RuntimeEngine(identity.version_id, snapshot["config"], nlu_predictor(adapter))
+    mock_integrations = request["mock_integrations"]
+    engine = RuntimeEngine(
+        identity.version_id,
+        snapshot["config"],
+        nlu_predictor(adapter),
+        mock_integrations=(
+            [MockIntegration.model_validate(item) for item in mock_integrations]
+            if mock_integrations is not None
+            else None
+        ),
+    )
     if request["action"] == "start":
         result = engine.start()
     elif request["action"] == "send":
