@@ -1,4 +1,4 @@
-"""Internal test-chat orchestration; not an HTTP API or an idempotency boundary."""
+"""Internal orchestration of idempotent test-chat turns."""
 
 import asyncio
 from dataclasses import dataclass, field
@@ -57,6 +57,7 @@ class TestChatService:
         self.factory = factory
         self.settings = settings
         self.executor = executor
+        self._pending: set[asyncio.Task[ChatResponse]] = set()
 
     async def _user(self, db: AsyncSession, user_id: UUID) -> User:
         user = await db.get(User, user_id)
@@ -154,6 +155,39 @@ class TestChatService:
             raise ExecutionError("runtime_request_timeout") from None
 
     async def send(
+        self,
+        user_id: UUID,
+        org_id: UUID,
+        conversation_id: UUID,
+        revision: int,
+        text: str,
+        credential: str,
+        message_id: UUID,
+        idempotency_key: str,
+    ) -> ChatResponse:
+        task = asyncio.create_task(
+            self._send(
+                user_id,
+                org_id,
+                conversation_id,
+                revision,
+                text,
+                credential,
+                message_id,
+                idempotency_key,
+            )
+        )
+        self._pending.add(task)
+
+        def finished(completed: asyncio.Task[ChatResponse]) -> None:
+            self._pending.discard(completed)
+            if not completed.cancelled():
+                completed.exception()
+
+        task.add_done_callback(finished)
+        return await asyncio.shield(task)
+
+    async def _send(
         self,
         user_id: UUID,
         org_id: UUID,

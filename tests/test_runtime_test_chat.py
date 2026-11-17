@@ -202,6 +202,52 @@ async def test_real_model_chat_and_revoked_access_during_execution(app, monkeypa
                 and failed.encrypted_response is None
             )
 
+        disconnected = await service.start(viewer_id, org_id, agent_id, version_id)
+        assert disconnected.credential is not None
+        disconnect_ready, disconnect_release = asyncio.Event(), asyncio.Event()
+        real_execute = executor.execute
+
+        async def pause_for_disconnect(**kwargs):
+            disconnect_ready.set()
+            await disconnect_release.wait()
+            return await real_execute(**kwargs)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(executor, "execute", pause_for_disconnect)
+            disconnected_id = uuid4()
+            caller = asyncio.create_task(
+                service.send(
+                    viewer_id,
+                    org_id,
+                    disconnected.conversation_id,
+                    1,
+                    "🛸🛸",
+                    disconnected.credential,
+                    disconnected_id,
+                    "disconnect-key",
+                )
+            )
+            try:
+                await asyncio.wait_for(disconnect_ready.wait(), 10)
+                caller.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await caller
+            finally:
+                disconnect_release.set()
+            completed = await asyncio.wait_for(asyncio.gather(*service._pending), 20)
+            assert len(completed) == 1 and completed[0].messages
+        after_disconnect = await service.send(
+            viewer_id,
+            org_id,
+            disconnected.conversation_id,
+            1,
+            "🛸🛸",
+            disconnected.credential,
+            disconnected_id,
+            "disconnect-key",
+        )
+        assert after_disconnect.replayed and after_disconnect.messages == completed[0].messages
+
         ready, release = asyncio.Event(), asyncio.Event()
         real_execute = executor.execute
 
