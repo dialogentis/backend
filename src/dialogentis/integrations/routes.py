@@ -18,6 +18,7 @@ from sqlalchemy.exc import IntegrityError
 from dialogentis.auth.security import VerifiedUser
 from dialogentis.contracts import CursorPage, InputModel, revision_etag
 from dialogentis.dependencies import Database
+from dialogentis.integrations.ledger_models import ActionExecution
 from dialogentis.integrations.models import Integration
 from dialogentis.integrations.schema import IntegrationInput, Method
 from dialogentis.integrations.secrets import IntegrationSecretError, seal_secret
@@ -240,6 +241,18 @@ async def delete_integration(
     await organization_context(db, user, org_id, "manage_integrations", lock=True)
     item = await find(db, org_id, integration_id)
     check_revision(item, if_match)
+    if (
+        await db.scalar(
+            select(ActionExecution.id)
+            .where(
+                ActionExecution.organization_id == org_id,
+                ActionExecution.integration_id == integration_id,
+            )
+            .limit(1)
+        )
+        is not None
+    ):
+        raise HTTPException(409, "Интеграция используется в диалогах. Отключите её вместо удаления")
     for model, node_path in (
         (
             AgentDraft,

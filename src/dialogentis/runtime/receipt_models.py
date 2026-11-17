@@ -43,6 +43,9 @@ class RuntimeReceipt(Base):
 
     __table_args__ = (
         UniqueConstraint(
+            "organization_id", "id", "conversation_id", name="uq_receipt_tenant_id_conversation"
+        ),
+        UniqueConstraint(
             "organization_id", "conversation_id", "client_message_id", name="uq_receipt_message"
         ),
         UniqueConstraint(

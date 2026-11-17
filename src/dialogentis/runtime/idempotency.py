@@ -10,6 +10,7 @@ from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from dialogentis.config import Settings
+from dialogentis.integrations.ledger_models import ActionExecution
 from dialogentis.models import Organization, User
 from dialogentis.runtime.conversations import (
     TurnReservation,
@@ -170,6 +171,17 @@ async def complete_message(
         or row.processing_token != reserved.reservation.token
     ):
         raise HTTPException(409, "Резервирование хода недействительно")
+    active_action = await db.scalar(
+        select(ActionExecution.id)
+        .where(
+            ActionExecution.organization_id == organization_id,
+            ActionExecution.receipt_id == reserved.turn_id,
+            ActionExecution.status == "started",
+        )
+        .limit(1)
+    )
+    if active_action is not None:
+        raise HTTPException(409, "Внешнее действие ещё выполняется")
     saved = await commit_turn(
         db,
         user,

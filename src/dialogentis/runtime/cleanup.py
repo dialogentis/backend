@@ -6,6 +6,7 @@ from uuid import UUID
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from dialogentis.integrations.ledger_models import ActionExecution
 from dialogentis.models import Organization
 from dialogentis.runtime.models import TestConversation
 from dialogentis.runtime.receipt_models import RuntimeReceipt
@@ -26,6 +27,24 @@ async def cleanup_expired_conversations(db: AsyncSession, organization_id: UUID)
     ).all()
     if not ids:
         return 0
+    await db.execute(
+        update(RuntimeReceipt)
+        .where(
+            RuntimeReceipt.organization_id == organization_id,
+            RuntimeReceipt.conversation_id.in_(ids),
+            RuntimeReceipt.status == "processing",
+        )
+        .values(status="unknown")
+    )
+    await db.execute(
+        update(ActionExecution)
+        .where(
+            ActionExecution.organization_id == organization_id,
+            ActionExecution.conversation_id.in_(ids),
+            ActionExecution.status == "started",
+        )
+        .values(status="unknown_result", finished_at=func.now())
+    )
     expiry_rows = (
         await db.execute(
             select(TestConversation.id, TestConversation.idle_expires_at).where(
@@ -88,6 +107,16 @@ async def recover_abandoned_turns(db: AsyncSession, organization_id: UUID) -> in
                 RuntimeReceipt.processing_token == token,
             )
             .values(status="unknown")
+        )
+        await db.execute(
+            update(ActionExecution)
+            .where(
+                ActionExecution.organization_id == organization_id,
+                ActionExecution.conversation_id == conversation_id,
+                ActionExecution.processing_token == token,
+                ActionExecution.status == "started",
+            )
+            .values(status="unknown_result", finished_at=func.now())
         )
         await db.execute(
             update(RuntimeReceipt)
