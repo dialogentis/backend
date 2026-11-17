@@ -12,13 +12,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from dialogentis.config import Settings
 from dialogentis.integrations.ledger_models import ActionExecution
 from dialogentis.models import Organization, User
+from dialogentis.runtime.checkpoint import decrypt_checkpoint, encrypt_checkpoint
 from dialogentis.runtime.conversations import (
     TurnReservation,
+    _check_terminal,
+    _identity,
     _locked_row,
     commit_turn,
+    create_conversation,
     reserve_turn,
 )
-from dialogentis.runtime.core import RuntimeResult, TraceEvent
+from dialogentis.runtime.core import RuntimeResult, RuntimeState, TraceEvent
 from dialogentis.runtime.receipt_models import RuntimeReceipt
 from dialogentis.runtime.receipts import (
     ReceiptIdentity,
@@ -44,6 +48,145 @@ class Replay:
 class ReservedMessage:
     turn_id: UUID
     reservation: TurnReservation = field(repr=False)
+
+
+@dataclass(frozen=True)
+class ReservedStart:
+    conversation_id: UUID
+    credential: str = field(repr=False)
+    turn: ReservedMessage = field(repr=False)
+
+
+async def reserve_initial_turn(
+    db: AsyncSession,
+    user: User,
+    organization_id: UUID,
+    agent_id: UUID,
+    version_id: UUID,
+    initial: RuntimeState,
+    settings: Settings,
+) -> ReservedStart:
+    """Reserve a private initial turn; a caller must commit before executing it."""
+    if (
+        initial.version_id != version_id
+        or initial.turn != 0
+        or initial.status != "waiting_input"
+        or initial.fallback_count != 0
+        or initial.pending_ask is not None
+        or initial.attempts
+    ):
+        raise ValueError("Invalid initial state")
+    created = await create_conversation(
+        db, user, organization_id, agent_id, version_id, initial, settings
+    )
+    assert created.credential is not None
+    turn = await reserve_message(
+        db,
+        user,
+        organization_id,
+        created.id,
+        created.credential,
+        created.revision,
+        uuid4(),
+        uuid4().hex,
+        "initial-turn",
+        settings,
+    )
+    assert isinstance(turn, ReservedMessage)
+    return ReservedStart(created.id, created.credential, turn)
+
+
+async def complete_initial_turn(
+    db: AsyncSession,
+    user: User,
+    organization_id: UUID,
+    reserved: ReservedStart,
+    result: RuntimeResult,
+    settings: Settings,
+) -> Replay:
+    """Commit the first result without counting it as a user message."""
+    _check_terminal(result.state)
+    row, now = await _locked_row(
+        db, user, organization_id, reserved.conversation_id, reserved.credential
+    )
+    turn = reserved.turn
+    receipt = await db.scalar(
+        select(RuntimeReceipt)
+        .where(
+            RuntimeReceipt.id == turn.turn_id,
+            RuntimeReceipt.organization_id == organization_id,
+            RuntimeReceipt.conversation_id == row.id,
+            RuntimeReceipt.created_by == user.id,
+        )
+        .with_for_update()
+    )
+    if (
+        row.id != turn.reservation.id
+        or row.revision != turn.reservation.revision
+        or row.processing_token != turn.reservation.token
+        or row.processing_expires_at is None
+        or row.processing_expires_at <= now
+        or receipt is None
+        or receipt.status != "processing"
+        or receipt.processing_token != turn.reservation.token
+    ):
+        raise HTTPException(409, "Резервирование хода недействительно")
+    if (
+        await db.scalar(
+            select(ActionExecution.id)
+            .where(
+                ActionExecution.organization_id == organization_id,
+                ActionExecution.receipt_id == turn.turn_id,
+                ActionExecution.status == "started",
+            )
+            .limit(1)
+        )
+        is not None
+    ):
+        raise HTTPException(409, "Внешнее действие ещё выполняется")
+    assert row.checkpoint is not None
+    previous = decrypt_checkpoint(row.checkpoint, _identity(row), settings)
+    if (
+        previous.turn != 0
+        or result.state.turn != 0
+        or result.state.version_id != previous.version_id
+        or result.state.flow_hash != previous.flow_hash
+    ):
+        raise ValueError("Invalid initial runtime transition")
+    row.checkpoint = (
+        encrypt_checkpoint(result.state, _identity(row), settings)
+        if result.state.status == "waiting_input"
+        else None
+    )
+    row.processing_token = None
+    row.processing_expires_at = None
+    row.idle_expires_at = min(now + timedelta(minutes=30), row.absolute_expires_at)
+    org = await db.get(Organization, organization_id)
+    assert org is not None
+    if org.store_message_text:
+        payload = ReceiptPayload.from_result(
+            row.revision, result.state.status, result.messages, result.trace, result.error_code
+        )
+        receipt.encrypted_response = seal_receipt(
+            payload, ReceiptIdentity(organization_id, row.id, receipt.id), settings
+        )
+    receipt.status, receipt.revision, receipt.runtime_status = (
+        "completed",
+        row.revision,
+        result.state.status,
+    )
+    if result.state.status != "waiting_input":
+        receipt.expires_at = now + timedelta(hours=24)
+    await db.flush()
+    return Replay(
+        receipt.id,
+        row.revision,
+        result.state.status,
+        org.store_message_text,
+        result.messages,
+        result.trace,
+        result.error_code,
+    )
 
 
 async def reserve_message(

@@ -5,7 +5,7 @@ import json
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from time import monotonic
-from typing import Literal
+from typing import Literal, cast
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr, ValidationError
@@ -189,13 +189,25 @@ class RuntimeEngine:
         self._version = version_id
         self._predict = predict
 
-    def start(self, values: dict | None = None) -> RuntimeResult:
+    def initial_state(self, values: dict | None = None) -> RuntimeState:
         if values is not None and not isinstance(values, dict):
             raise RuntimeFault("invalid_slot_values")
         initial = {slot.code: slot.default for slot in self._slots if slot.default is not None}
         initial.update(values or {})
         self._check_values(initial, "invalid_slot_values")
-        return self._run(self._start, None, 0, 0, initial, {}, None)
+        return RuntimeState(
+            version_id=self._version,
+            flow_hash=self._hash,
+            node_id=self._start,
+            status="waiting_input",
+            turn=0,
+            fallback_count=0,
+            slot_values=tuple(sorted(cast(dict[str, str | int | bool | None], initial).items())),
+        )
+
+    def start(self, values: dict | None = None) -> RuntimeResult:
+        initial = self.initial_state(values)
+        return self._run(self._start, None, 0, 0, dict(initial.slot_values), {}, None)
 
     def send(self, state: RuntimeState, text: str, values: dict | None = None) -> RuntimeResult:
         if values is not None and not isinstance(values, dict):
