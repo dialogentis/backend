@@ -12843,6 +12843,11 @@
             "type": "boolean",
             "title": "Enabled",
             "default": true
+          },
+          "supports_idempotency": {
+            "type": "boolean",
+            "title": "Supports Idempotency",
+            "default": false
           }
         },
         "additionalProperties": false,
@@ -12938,6 +12943,17 @@
               }
             ],
             "title": "Enabled"
+          },
+          "supports_idempotency": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Supports Idempotency"
           }
         },
         "additionalProperties": false,
@@ -12984,6 +13000,10 @@
             "type": "boolean",
             "title": "Enabled"
           },
+          "supports_idempotency": {
+            "type": "boolean",
+            "title": "Supports Idempotency"
+          },
           "has_secret": {
             "type": "boolean",
             "title": "Has Secret"
@@ -13007,6 +13027,7 @@
           "paths",
           "response_fields",
           "enabled",
+          "supports_idempotency",
           "has_secret",
           "revision",
           "created_at"
@@ -14021,7 +14042,10 @@
           },
           "http_mode": {
             "type": "string",
-            "const": "mock",
+            "enum": [
+              "mock",
+              "live"
+            ],
             "title": "Http Mode",
             "default": "mock"
           }

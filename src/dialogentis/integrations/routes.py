@@ -36,6 +36,7 @@ class IntegrationPatch(InputModel):
     paths: list[StrictStr] | None = None
     response_fields: list[StrictStr] | None = None
     enabled: StrictBool | None = None
+    supports_idempotency: StrictBool | None = None
 
     @model_validator(mode="after")
     def valid_changes(self):
@@ -58,6 +59,7 @@ class IntegrationView(BaseModel):
     paths: list[str]
     response_fields: list[str]
     enabled: bool
+    supports_idempotency: bool
     has_secret: bool
     revision: int
     created_at: datetime
@@ -72,6 +74,7 @@ def view(item: Integration) -> IntegrationView:
         paths=item.paths,
         response_fields=item.response_fields,
         enabled=item.enabled,
+        supports_idempotency=item.supports_idempotency,
         has_secret=item.encrypted_secret is not None,
         revision=item.revision,
         created_at=item.created_at,
@@ -185,6 +188,7 @@ async def update_integration(
                 "paths": item.paths,
                 "response_fields": item.response_fields,
                 "enabled": item.enabled,
+                "supports_idempotency": item.supports_idempotency,
             }
             | body.model_dump(exclude_unset=True)
         )

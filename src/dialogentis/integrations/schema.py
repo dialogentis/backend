@@ -89,6 +89,7 @@ class IntegrationInput(InputModel):
     response_fields: list[StrictStr] = Field(default_factory=list, max_length=100)
     secret: SecretStr | None = Field(default=None, repr=False)
     enabled: StrictBool = True
+    supports_idempotency: StrictBool = False
 
     @field_validator("name")
     @classmethod

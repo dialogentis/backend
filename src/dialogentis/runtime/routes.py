@@ -39,7 +39,7 @@ ChatUser = Annotated[UUID, Depends(chat_user_id)]
 
 class StartInput(InputModel):
     version_id: UUID
-    http_mode: Literal["mock"] = "mock"
+    http_mode: Literal["mock", "live"] = "mock"
 
 
 class MessageInput(InputModel):
@@ -109,7 +109,12 @@ async def start_chat(
 ):
     try:
         result = await service(request).start(
-            user_id, org_id, agent_id, body.version_id, idempotency_key=key
+            user_id,
+            org_id,
+            agent_id,
+            body.version_id,
+            idempotency_key=key,
+            http_mode=body.http_mode,
         )
     except InvalidVersionFlow as exc:
         return invalid_flow_response(request, exc)

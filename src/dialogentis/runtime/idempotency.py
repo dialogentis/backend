@@ -77,6 +77,7 @@ async def reserve_initial_turn(
     settings: Settings,
     *,
     idempotency_key: str | None = None,
+    http_mode: str = "mock",
 ) -> ReservedStart | ReplayedStart:
     """Reserve a private initial turn; a caller must commit before executing it."""
     if (
@@ -92,7 +93,13 @@ async def reserve_initial_turn(
     conversation_id, message_id, credential = start_identity(
         settings, organization_id, user.id, agent_id, key
     )
-    await organization_context(db, user, organization_id, lock=True)
+    await organization_context(
+        db,
+        user,
+        organization_id,
+        "manage_integrations" if http_mode == "live" else None,
+        lock=True,
+    )
     row = await db.get(TestConversation, conversation_id)
     receipt = await db.scalar(
         select(RuntimeReceipt.id).where(
@@ -102,7 +109,12 @@ async def reserve_initial_turn(
         )
     )
     if row is not None:
-        if row.agent_id != agent_id or row.created_by != user.id or row.version_id != version_id:
+        if (
+            row.agent_id != agent_id
+            or row.created_by != user.id
+            or row.version_id != version_id
+            or row.http_mode != http_mode
+        ):
             raise HTTPException(409, "Ключ уже использован для другого диалога")
         if row.revision != 1 or receipt is None:
             raise HTTPException(409, "Диалог изменился или результат запуска недоступен")
@@ -133,6 +145,7 @@ async def reserve_initial_turn(
         settings,
         conversation_id=conversation_id,
         credential=credential,
+        http_mode=http_mode,
     )
     assert created.credential is not None
     turn = await reserve_message(
@@ -264,6 +277,8 @@ async def reserve_message(
     row, now = await _locked_row(
         db, user, organization_id, conversation_id, credential, allow_terminal=True
     )
+    if row.http_mode == "live":
+        await organization_context(db, user, organization_id, "manage_integrations", lock=True)
     matches = (
         await db.scalars(
             select(RuntimeReceipt)

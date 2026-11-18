@@ -98,14 +98,24 @@ def mock_http_action(
         return "http_error"
     if config.mock_outcome != "success":
         return config.mock_outcome
+    mapped = map_http_response(config, integration.response_fields, slots, config.mock_response)
+    if mapped is None:
+        return "invalid_response"
+    values.update(mapped)
+    return "success"
+
+
+def map_http_response(
+    config: HttpActionConfig, response_fields: list[str], slots: dict[UUID, Slot], response: object
+) -> dict | None:
     mapped = {}
     for field, slot_id in config.response_mapping.items():
-        if field not in integration.response_fields:
-            return "invalid_response"
-        value = config.mock_response
+        if field not in response_fields:
+            return None
+        value = response
         for part in field.split("."):
             if not part or not isinstance(value, dict) or part not in value:
-                return "invalid_response"
+                return None
             value = value[part]
         slot = slots[slot_id]
         try:
@@ -113,10 +123,9 @@ def mock_http_action(
                 value.encode("utf-8")
             Slot.model_validate({**slot.model_dump(), "default": value})
         except ValidationError, UnicodeError:
-            return "invalid_response"
+            return None
         mapped[slot.code] = value
-    values.update(mapped)
-    return "success"
+    return mapped
 
 
 def check_http_references(config: HttpActionDraftConfig, slots: dict[UUID, Slot]) -> None:

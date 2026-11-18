@@ -31,6 +31,7 @@ class Integration(Base):
     response_fields: Mapped[list[str]] = mapped_column(JSONB)
     encrypted_secret: Mapped[bytes | None] = mapped_column(LargeBinary)
     enabled: Mapped[bool] = mapped_column(default=True, server_default=text("true"))
+    supports_idempotency: Mapped[bool] = mapped_column(default=False, server_default=text("false"))
     revision: Mapped[int] = mapped_column(default=1, server_default=text("1"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 

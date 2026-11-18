@@ -33,6 +33,7 @@ from dialogentis.runtime.idempotency import (
     reserve_message,
 )
 from dialogentis.runtime.limits import run_limited
+from dialogentis.runtime.live_http import LiveHttpTurn
 from dialogentis.runtime.models import TestConversation
 from dialogentis.slots import validate_slots
 from dialogentis.versions.models import AgentVersion
@@ -158,13 +159,14 @@ class TestChatService:
         version_id: UUID,
         state=None,
         text=None,
+        live_http: LiveHttpTurn | None = None,
     ) -> RuntimeResult:
         async def work() -> RuntimeResult:
             async with unit_of_work(self.factory, organization_id=org_id, user_id=user_id) as db:
                 bundle = await self._bundle(
                     db, await self._user(db, user_id), org_id, agent_id, version_id
                 )
-            return await self._execute_in_slot(action, bundle, state, text)
+            return await self._execute_in_slot(action, bundle, state, text, live_http)
 
         try:
             async with asyncio.timeout(20):
@@ -173,7 +175,12 @@ class TestChatService:
             raise ExecutionError("runtime_timeout") from None
 
     async def _execute_in_slot(
-        self, action: str, bundle: _Bundle, state=None, text=None
+        self,
+        action: str,
+        bundle: _Bundle,
+        state=None,
+        text=None,
+        live_http: LiveHttpTurn | None = None,
     ) -> RuntimeResult:
         config = bundle.snapshot["config"]
         parsed_slots, errors = validate_slots(config.get("slots", []))
@@ -189,6 +196,10 @@ class TestChatService:
 
         async def handle_http(node_id: UUID, inputs: dict) -> tuple[str, dict]:
             http_action = actions[node_id]
+            if live_http is not None:
+                return await live_http.execute(
+                    self.factory, self.settings, node_id, http_action, slots, inputs
+                )
             values = dict(inputs)
             outcome = mock_http_action(
                 http_action, integrations.get(http_action.integration_id), slots, values
@@ -233,9 +244,12 @@ class TestChatService:
         version_id: UUID,
         *,
         idempotency_key: str | None = None,
+        http_mode: str = "mock",
     ) -> ChatResponse:
+        if http_mode not in ("mock", "live") or (http_mode == "live" and idempotency_key is None):
+            raise HTTPException(422, "Для реальных вызовов укажите ключ запуска")
         return await self._run_detached(
-            self._start(user_id, org_id, agent_id, version_id, idempotency_key)
+            self._start(user_id, org_id, agent_id, version_id, idempotency_key, http_mode)
         )
 
     async def _start(
@@ -245,7 +259,10 @@ class TestChatService:
         agent_id: UUID,
         version_id: UUID,
         idempotency_key: str | None,
+        http_mode: str,
     ) -> ChatResponse:
+        deadline = asyncio.get_running_loop().time() + 20
+
         async def work() -> ChatResponse:
             async with unit_of_work(self.factory, organization_id=org_id, user_id=user_id) as db:
                 user = await self._user(db, user_id)
@@ -266,12 +283,18 @@ class TestChatService:
                     initial,
                     self.settings,
                     idempotency_key=idempotency_key,
+                    http_mode=http_mode,
                 )
             replayed = isinstance(reserved, ReplayedStart)
             if isinstance(reserved, ReplayedStart):
                 saved = reserved.result
             else:
-                result = await self._execute_in_slot("start", bundle)
+                live_http = (
+                    LiveHttpTurn(org_id, user_id, reserved.credential, reserved.turn, deadline)
+                    if http_mode == "live"
+                    else None
+                )
+                result = await self._execute_in_slot("start", bundle, live_http=live_http)
                 async with unit_of_work(
                     self.factory, organization_id=org_id, user_id=user_id
                 ) as db:
@@ -390,9 +413,27 @@ class TestChatService:
                     row = await db.get(TestConversation, conversation_id)
                     if row is None or row.created_by != user_id:
                         raise HTTPException(404, "Диалог не найден")
-                    agent_id, version_id = row.agent_id, row.version_id
+                    agent_id, version_id, http_mode = row.agent_id, row.version_id, row.http_mode
+                live_http = (
+                    LiveHttpTurn(
+                        org_id,
+                        user_id,
+                        credential,
+                        reserved,
+                        asyncio.get_running_loop().time() + 20,
+                    )
+                    if http_mode == "live"
+                    else None
+                )
                 result = await self._execute(
-                    "send", user_id, org_id, agent_id, version_id, reserved.reservation.state, text
+                    "send",
+                    user_id,
+                    org_id,
+                    agent_id,
+                    version_id,
+                    reserved.reservation.state,
+                    text,
+                    live_http,
                 )
                 async with unit_of_work(
                     self.factory, organization_id=org_id, user_id=user_id

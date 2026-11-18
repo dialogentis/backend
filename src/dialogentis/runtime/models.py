@@ -27,6 +27,7 @@ class TestConversation(Base):
     version_id: Mapped[UUID] = mapped_column()
     created_by: Mapped[UUID] = mapped_column(ForeignKey("users.id"))
     checkpoint: Mapped[bytes | None] = mapped_column(LargeBinary)
+    http_mode: Mapped[str] = mapped_column(String(4), default="mock", server_default="mock")
     credential_hash: Mapped[str | None] = mapped_column(String(64))
     revision: Mapped[int] = mapped_column(default=1)
     processing_token: Mapped[UUID | None] = mapped_column()
@@ -42,6 +43,7 @@ class TestConversation(Base):
             ondelete="CASCADE",
         ),
         CheckConstraint("revision > 0"),
+        CheckConstraint("http_mode IN ('mock', 'live')", name="ck_test_conversations_http_mode"),
         CheckConstraint(
             "credential_hash IS NULL OR credential_hash ~ '^[0-9a-f]{64}$'",
             name="ck_test_conversations_credential_hash",

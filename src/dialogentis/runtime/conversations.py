@@ -72,6 +72,7 @@ async def create_conversation(
     *,
     conversation_id: UUID | None = None,
     credential: str | None = None,
+    http_mode: str = "mock",
 ) -> ConversationSnapshot:
     await _access(db, user, organization_id)
     version_and_job = (
@@ -106,6 +107,7 @@ async def create_conversation(
         version_id=version_id,
         created_by=user.id,
         credential_hash=digest(credential),
+        http_mode=http_mode,
         revision=1,
         created_at=now,
         idle_expires_at=now + timedelta(minutes=30),
