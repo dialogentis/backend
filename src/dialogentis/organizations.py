@@ -39,6 +39,7 @@ Permission = Literal[
     "revoke_lease",
     "manage_settings",
     "manage_integrations",
+    "manage_channels",
     "publish_agents",
 ]
 ROLE_PERMISSIONS: dict[str, frozenset[Permission]] = {
@@ -52,6 +53,7 @@ ROLE_PERMISSIONS: dict[str, frozenset[Permission]] = {
             "revoke_lease",
             "manage_settings",
             "manage_integrations",
+            "manage_channels",
             "publish_agents",
         }
     ),
@@ -62,6 +64,7 @@ ROLE_PERMISSIONS: dict[str, frozenset[Permission]] = {
             "revoke_lease",
             "manage_settings",
             "manage_integrations",
+            "manage_channels",
             "publish_agents",
         }
     ),

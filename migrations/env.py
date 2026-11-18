@@ -3,6 +3,7 @@ from sqlalchemy import create_engine
 
 import dialogentis.artifact_records  # noqa: F401 - register artifact tables
 import dialogentis.auth.models  # noqa: F401 - register auth tables for metadata comparison
+import dialogentis.channels.api_key_models  # noqa: F401 - register API keys
 import dialogentis.datasets.export_models  # noqa: F401 - register export tables
 import dialogentis.datasets.import_models  # noqa: F401 - register import tables
 import dialogentis.integrations.ledger_models  # noqa: F401 - register action executions
