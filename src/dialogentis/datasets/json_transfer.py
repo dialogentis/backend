@@ -11,6 +11,7 @@ from dialogentis.contracts import InputModel
 from dialogentis.datasets.csv_import import MAX_ERRORS, MAX_FILE_BYTES, unique_object
 from dialogentis.datasets.schema import Dataset, Entity, Example, Intent, validate_dataset
 from dialogentis.flow_schema import Flow
+from dialogentis.http_action import HTTP_OUTPUTS, HttpActionDraftConfig, validate_http_references
 from dialogentis.nlu.settings import NLUSettings, QualitySettings
 from dialogentis.set_slot import SetSlotDraftConfig
 from dialogentis.slots import Slot, validate_slots
@@ -43,6 +44,8 @@ class PortableConfig(InputModel):
         _, slot_errors = validate_slots([slot.model_dump(mode="json") for slot in self.slots])
         if slot_errors:
             raise ValueError("Duplicate or invalid slots")
+        if validate_http_references(self.flow, self.slots):
+            raise ValueError("Invalid HTTP action")
         allowed = {
             "start": set(),
             "switch_intent": set(),
@@ -52,6 +55,7 @@ class PortableConfig(InputModel):
             "ask_slot": {"slot_id", "prompt", "entity_id", "max_attempts", "checks"},
             "set_slot": {"slot_id", "operation", "source", "source_slot_id", "value"},
             "condition": {"branches"},
+            "http_action": set(HttpActionDraftConfig.model_fields),
         }
         if self.flow.layout:
             raise ValueError("Unsupported layout")
@@ -66,6 +70,7 @@ class PortableConfig(InputModel):
             "switch_intent": {"fallback", *(str(intent.id) for intent in self.intents)},
             "ask_slot": {"success", "invalid", "exhausted"},
             "set_slot": {"next", "error"},
+            "http_action": set(HTTP_OUTPUTS),
         }
         for node in self.flow.nodes:
             if node.type not in allowed or set(node.config) - allowed[node.type]:

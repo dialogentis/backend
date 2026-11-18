@@ -1,3 +1,4 @@
+import json
 from copy import deepcopy
 from uuid import uuid4
 
@@ -5,6 +6,8 @@ import pytest
 from fastapi import HTTPException
 
 from dialogentis.agents import copy_config, empty_config
+from dialogentis.datasets.export_worker import serialize_export
+from dialogentis.datasets.json_transfer import parse_json
 from dialogentis.datasets.routes import validate_configuration
 from dialogentis.flow_validation import validate_flow
 from dialogentis.http_action import HTTP_OUTPUTS
@@ -73,3 +76,21 @@ def test_http_action_copy_remaps_slots_but_keeps_integration_and_mock():
     action["config"]["query"]["bad"] = str(uuid4())
     with pytest.raises(HTTPException):
         copy_config(config)
+
+
+def test_http_action_round_trips_through_json_and_rejects_raw_headers():
+    config, action = configuration()
+    exported = serialize_export(config, "json")
+    loaded, errors = parse_json(exported)
+    assert not errors and loaded is not None
+    restored = next(node for node in loaded.flow.nodes if node.type == "http_action")
+    assert restored.config == action["config"]
+    assert {edge.source_handle for edge in loaded.flow.edges if edge.source == restored.id} == set(
+        HTTP_OUTPUTS
+    )
+    payload = json.loads(exported)
+    payload["config"]["flow"]["nodes"][-1]["config"]["headers"] = {"Authorization": "token"}
+    assert parse_json(json.dumps(payload).encode())[0] is None
+    del payload["config"]["flow"]["nodes"][-1]["config"]["headers"]
+    payload["config"]["flow"]["nodes"][-1]["config"]["body"]["order_id"] = str(uuid4())
+    assert parse_json(json.dumps(payload).encode())[0] is None
