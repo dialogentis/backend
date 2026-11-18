@@ -1,6 +1,7 @@
 import asyncio
 import os
 from copy import deepcopy
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -21,6 +22,7 @@ from dialogentis.jobs.training_tasks import HANDLERS
 from dialogentis.models import AgentDraft, Membership
 from dialogentis.runtime.cleanup import cleanup_expired_conversations
 from dialogentis.runtime.executor import RuntimeExecutor
+from dialogentis.runtime.history import load_dialogue_context
 from dialogentis.runtime.history_models import ConversationHistory, HistoryTurn
 from dialogentis.runtime.models import TestConversation as ConversationRecord
 from dialogentis.runtime.receipt_models import RuntimeReceipt
@@ -28,6 +30,7 @@ from dialogentis.runtime.test_chat import TestChatService as ChatService
 from dialogentis.runtime.watchdog import recover_once
 from tests.test_auth import client_for
 from tests.test_exports import app as app
+from tests.test_runtime_core import edge, node
 from tests.test_runtime_handoff import call_flows
 from tests.test_versions import create_agent, populate, prepare
 
@@ -39,7 +42,7 @@ pytestmark = [
 ]
 
 
-async def test_handoff_uses_ready_agent_from_same_organization_and_resumes_caller(app):
+async def test_handoff_uses_ready_agent_from_same_organization_and_resumes_caller(app, monkeypatch):
     async with client_for(app) as owner, client_for(app) as other:
         user_id, org_id, root_id = await create_agent(app, owner)
         other_user, other_org, other_agent = await create_agent(app, other)
@@ -49,6 +52,21 @@ async def test_handoff_uses_ready_agent_from_same_organization_and_resumes_calle
         assert target_reply.status_code == 201
         target_id = UUID(target_reply.json()["id"])
         root, target, _, _, call, _ = call_flows()
+        root["slots"][0]["sensitive"] = target["slots"][0]["sensitive"] = True
+        call["config"]["include_history"] = True
+        start, switch = root["flow"]["nodes"][:2]
+        greeting = node("say", text="Я записал номер {{order_number}}.")
+        root["flow"]["nodes"].append(greeting)
+        root["flow"]["edges"] = [
+            edge(start, greeting),
+            edge(greeting, switch),
+            edge(switch, call, "fallback"),
+            *(
+                item
+                for item in root["flow"]["edges"]
+                if item["source"] not in (start["id"], switch["id"])
+            ),
+        ]
 
         async def save_flow(organization_id, agent_id, config):
             await populate(app, organization_id, agent_id)
@@ -90,22 +108,72 @@ async def test_handoff_uses_ready_agent_from_same_organization_and_resumes_calle
         version = (await prepare(app, user_id, org_id, root_id, 1, "root")).version
         await process_job(app.state.session_factory, version.job_id, org_id, HANDLERS, "training")
         service = app.state.test_chat_service
+        contexts = []
+
+        async def observe_history(*args):
+            context = await load_dialogue_context(*args)
+            contexts.append([(message.role, message.text) for message in context.messages])
+            return context
+
+        monkeypatch.setattr("dialogentis.runtime.test_chat.load_dialogue_context", observe_history)
+
+        async def send(chat, text):
+            assert chat.credential is not None
+            message_id = uuid4()
+            return await service.send(
+                user_id,
+                org_id,
+                chat.conversation_id,
+                chat.revision,
+                text,
+                chat.credential,
+                message_id,
+                str(message_id),
+            )
+
         started = await service.start(user_id, org_id, root_id, version.id)
-        assert started.status == "waiting_input" and started.messages == ("Где заказ 321?",)
-        assert any(event.output == str(delivery.id) for event in started.trace)
-        assert started.credential is not None
-        result = await service.send(
-            user_id,
-            org_id,
-            started.conversation_id,
-            1,
-            "Завтра",
-            started.credential,
-            uuid4(),
-            "answer",
+        assert started.status == "waiting_input" and started.messages == ("Я записал номер 321.",)
+        assert not contexts
+        connected = await send(started, "🧩🧩")
+        assert connected.messages == ("Где заказ 321?",)
+        assert any(event.output == str(delivery.id) for event in connected.trace)
+        assert any(
+            event.event == "handoff_history" and event.output == "1" for event in connected.trace
         )
+        assert contexts == [[("agent", "Я записал номер [скрыто].")]]
+        assert started.credential is not None
+        result = await send(replace(connected, credential=started.credential), "Завтра")
         assert result.status == "completed" and result.messages == ("Доставка: Завтра / важно",)
         assert any(event.event == "returned" for event in result.trace)
+
+        expired = await service.start(user_id, org_id, root_id, version.id)
+        async with unit_of_work(app.state.session_factory, organization_id=org_id) as db:
+            old = await db.get(HistoryTurn, (org_id, expired.conversation_id, 0))
+            assert old is not None and old.encrypted_messages is not None
+            old.created_at = datetime.now(UTC) - timedelta(days=31)
+        transfer = await send(expired, "🛸🛸")
+        assert contexts[-1] == []
+        assert any(
+            event.event == "handoff_history" and event.output == "0" for event in transfer.trace
+        )
+
+        private = await service.start(user_id, org_id, root_id, version.id)
+        settings_url = f"/api/v1/organizations/{org_id}"
+        settings = await owner.get(settings_url)
+        updated = await owner.patch(
+            settings_url,
+            json={"store_message_text": False, "purge_existing_text": False},
+            headers={"If-Match": settings.headers["etag"]},
+        )
+        assert updated.status_code == 200
+        async with unit_of_work(app.state.session_factory, organization_id=org_id) as db:
+            kept = await db.get(HistoryTurn, (org_id, private.conversation_id, 0))
+            assert kept is not None and kept.encrypted_messages is not None
+        transfer = await send(private, "🛸🛸")
+        assert len(contexts) == 3 and contexts[-1] == []
+        assert any(
+            event.event == "handoff_history" and event.output == "0" for event in transfer.trace
+        )
 
 
 async def test_mock_and_live_http_actions_use_organization_policy(app, monkeypatch, caplog):

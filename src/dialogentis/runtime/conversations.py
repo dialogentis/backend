@@ -69,6 +69,7 @@ def _check_terminal(state: RuntimeState) -> None:
         or state.attempts
         or state.pending_ask
         or state.active_path
+        or state.history_sources
         or state.callers
     ):
         raise ValueError("Terminal state must not contain runtime values")

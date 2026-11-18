@@ -1,9 +1,12 @@
 from uuid import UUID, uuid4
 
+import pytest
+
 from dialogentis.agents import copy_config, empty_config
 from dialogentis.datasets.export_worker import serialize_export
 from dialogentis.datasets.json_transfer import parse_json
 from dialogentis.runtime.core import Prediction, RuntimeEngine, RuntimeState
+from dialogentis.runtime.history_context import ContextMessage, HistoryContext, recent_history
 from tests.test_runtime_core import edge, node
 
 
@@ -137,7 +140,8 @@ def test_handoff_copy_only_remaps_local_parameters_and_json_keeps_pinned_version
     )
 
 
-def test_only_explicitly_forwarded_current_text_reaches_next_agent():
+@pytest.mark.parametrize(("forward", "include"), [(False, False), (True, False), (True, True)])
+def test_only_enabled_text_context_reaches_next_agent(forward, include):
     root, target, root_version, target_version, call, _ = call_flows()
     start, switch, _, _ = root["flow"]["nodes"][:4]
     root["flow"]["edges"][0] = edge(start, switch)
@@ -147,21 +151,62 @@ def test_only_explicitly_forwarded_current_text_reaches_next_agent():
     root["flow"]["edges"].append(edge(switch, call, "fallback"))
     target_start, target_switch = target["flow"]["nodes"][:2]
     target["flow"]["edges"][0] = edge(target_start, target_switch)
-    texts = []
+    seen = []
+    history = HistoryContext(
+        messages=(ContextMessage(role="agent", text="История контекста"),), truncated=True
+    )
     second = RuntimeEngine(
         target_version,
         target,
-        lambda text: texts.append(text) or Prediction(target_version, None, ("low_score",)),
+        lambda message: seen.append(message) or Prediction(target_version, None, ("low_score",)),
     )
-    for forward in (False, True):
-        call["config"]["forward_current_message"] = forward
-        first = RuntimeEngine(
-            root_version,
-            root,
-            lambda _: Prediction(root_version, None, ("low_score",)),
-            resolve_version={target_version: second}.get,
+    call["config"].update(forward_current_message=forward, include_history=include)
+    root_inputs = []
+    requested = []
+    stored = history
+
+    def load_history(version, node):
+        requested.append((version, node))
+        return stored
+
+    first = RuntimeEngine(
+        root_version,
+        root,
+        lambda message: (
+            root_inputs.append(message) or Prediction(root_version, None, ("low_score",))
+        ),
+        resolve_version={target_version: second}.get,
+        load_history=load_history,
+    )
+    episode = first.start()
+    result = first.send(episode.state, "Где заказ?")
+    assert result.state.active_path == (target_version,)
+    assert [message.text for message in seen] == (["Где заказ?"] if forward else [])
+    assert not root_inputs[0].history.messages
+    assert all(message.history == (history if include else HistoryContext()) for message in seen)
+    assert bool(requested) is include
+    assert all(request == (root_version, UUID(call["id"])) for request in requested)
+    encoded = result.state.model_dump_json()
+    assert "История контекста" not in encoded and "История контекста" not in repr(result)
+    if include:
+        assert any(
+            event.event == "handoff_history_truncated" and event.output == "1"
+            for event in result.trace
         )
-        episode = first.start()
-        result = first.send(episode.state, "Где заказ?")
-        assert result.state.active_path == (target_version,)
-        assert texts == (["Где заказ?"] if forward else [])
+        stored = HistoryContext()
+        first.send(RuntimeState.model_validate_json(encoded), "Уточнение")
+        assert seen[-1].text == "Уточнение" and not seen[-1].history.messages
+
+
+def test_recent_history_keeps_latest_messages_up_to_both_bounds():
+    def message(text, role="agent"):
+        return ContextMessage(role=role, text=text)
+
+    short = [message(str(index), "user") for index in range(27)]
+    context = recent_history(reversed(short))
+    assert context.messages == tuple(short[-20:]) and context.truncated
+    newest = [message("👩" * 3_500)] * 4
+    context = recent_history([*newest, message("Б" * 3_000, "user"), message("Старая")])
+    assert context.truncated and context.messages == (message("Б" * 2_000, "user"), *newest)
+    full = [message("👩" * 4_000)] * 4
+    assert not recent_history(full).truncated

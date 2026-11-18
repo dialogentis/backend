@@ -23,11 +23,25 @@ from dialogentis.flow_validation import validate_flow
 from dialogentis.http_action import HttpActionConfig, MockIntegration, mock_http_action
 from dialogentis.integrations.models import Integration
 from dialogentis.jobs.models import Job
-from dialogentis.models import Agent, User
+from dialogentis.models import Agent, Organization, User
 from dialogentis.nlu.model_store import ModelIdentity
 from dialogentis.runtime.conversations import Principal, PublicAccess, _access
-from dialogentis.runtime.core import Prediction, RuntimeEngine, RuntimeResult, TraceEvent
-from dialogentis.runtime.executor import ExecutionError, HttpHandler, RuntimeExecutor, RuntimeTarget
+from dialogentis.runtime.core import (
+    Prediction,
+    RuntimeEngine,
+    RuntimeResult,
+    RuntimeState,
+    TraceEvent,
+)
+from dialogentis.runtime.executor import (
+    ExecutionError,
+    HistoryLoader,
+    HttpHandler,
+    RuntimeExecutor,
+    RuntimeTarget,
+)
+from dialogentis.runtime.history import load_dialogue_context
+from dialogentis.runtime.history_context import HistoryContext
 from dialogentis.runtime.idempotency import (
     Replay,
     ReplayedStart,
@@ -183,16 +197,31 @@ class TestChatService:
 
     async def _execute(
         self,
-        action: str,
         user_id: Actor,
         org_id: UUID,
         agent_id: UUID,
         version_id: UUID,
-        state=None,
-        text=None,
+        conversation_id: UUID,
+        state: RuntimeState,
+        text: str,
         live_http: LiveHttpTurn | None = None,
         manifest: Manifest | None = None,
     ) -> RuntimeResult:
+        async def load_history() -> HistoryContext:
+            async with unit_of_work(
+                self.factory, organization_id=org_id, user_id=session_user(user_id)
+            ) as db:
+                user = await self._user(db, user_id)
+                if isinstance(user, PublicAccess):
+                    await user.authorize(db)
+                else:
+                    await _access(db, user, org_id)
+                org = await db.get(Organization, org_id)
+                assert org is not None
+                return await load_dialogue_context(
+                    db, org, conversation_id, state.turn + 1, self.settings
+                )
+
         async def work() -> RuntimeResult:
             async with unit_of_work(
                 self.factory, organization_id=org_id, user_id=session_user(user_id)
@@ -201,7 +230,7 @@ class TestChatService:
                     db, await self._user(db, user_id), org_id, agent_id, version_id, manifest
                 )
             return await self._execute_in_slot(
-                action, bundle, user_id, state, text, live_http, manifest
+                "send", bundle, user_id, state, text, live_http, manifest, load_history
             )
 
         try:
@@ -256,6 +285,7 @@ class TestChatService:
         text=None,
         live_http: LiveHttpTurn | None = None,
         manifest: Manifest | None = None,
+        history_loader: HistoryLoader | None = None,
     ) -> RuntimeResult:
         async def load_target(agent_id: UUID, version_id: UUID) -> RuntimeTarget | None:
             org_id = bundle.identity.organization_id
@@ -307,6 +337,7 @@ class TestChatService:
             text=text,
             http_handler=handler,
             target_loader=loader,
+            history_loader=history_loader,
         )
 
     async def start(
@@ -556,11 +587,11 @@ class TestChatService:
                     else None
                 )
                 result = await self._execute(
-                    "send",
                     user_id,
                     org_id,
                     agent_id,
                     version_id,
+                    conversation_id,
                     reserved.reservation.state,
                     text,
                     live_http,

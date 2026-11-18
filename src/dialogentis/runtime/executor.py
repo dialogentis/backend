@@ -18,6 +18,7 @@ from dialogentis.http_action import HTTP_OUTPUTS, HttpActionConfig, MockIntegrat
 from dialogentis.nlu.model_store import ModelIdentity
 from dialogentis.runtime.child import MAX_REQUEST, MAX_RESPONSE
 from dialogentis.runtime.core import RuntimeResult, RuntimeState, TraceEvent
+from dialogentis.runtime.history_context import HistoryContext
 from dialogentis.slots import Slot, validate_slots
 from dialogentis.versions.prepare import canonical_hash
 
@@ -35,6 +36,7 @@ class RuntimeTarget:
 
 
 TargetLoader = Callable[[UUID, UUID], Awaitable[RuntimeTarget | None]]
+HistoryLoader = Callable[[], Awaitable[HistoryContext]]
 
 
 class HttpFrame(BaseModel):
@@ -49,6 +51,13 @@ class TargetFrame(BaseModel):
     model_config = ConfigDict(extra="forbid")
     kind: Literal["handoff_target"]
     version_id: UUID
+
+
+class HistoryFrame(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    kind: Literal["handoff_history"]
+    version_id: UUID
+    node_id: UUID
 
 
 def _scope(snapshot: dict, config_hash: str):
@@ -72,13 +81,16 @@ def _scope(snapshot: dict, config_hash: str):
     ):
         raise ValueError("Invalid slot reference")
     targets = {}
+    history_nodes = set()
     for node in flow.nodes:
         if node.type == "handoff":
             handoff = HandoffConfig.model_validate(node.config)
             previous = targets.setdefault(handoff.target_version_id, handoff.target_agent_id)
             if previous != handoff.target_agent_id:
                 raise ValueError("Conflicting handoff reference")
-    return actions, {slot.code: slot for slot in slots}, targets
+            if handoff.include_history:
+                history_nodes.add(node.id)
+    return actions, {slot.code: slot for slot in slots}, targets, history_nodes
 
 
 class ExecutionError(ValueError):
@@ -128,6 +140,7 @@ class RuntimeExecutor:
         mock_integrations: list[MockIntegration] | None = None,
         http_handler: HttpHandler | None = None,
         target_loader: TargetLoader | None = None,
+        history_loader: HistoryLoader | None = None,
     ) -> RuntimeResult:
         if settings.encryption_key is None:
             raise ExecutionError("runtime_key_unavailable")
@@ -153,9 +166,12 @@ class RuntimeExecutor:
         actions: dict[UUID, HttpActionConfig] = {}
         slots: dict[str, Slot] = {}
         targets: dict[UUID, UUID] = {}
+        history_nodes: set[UUID] = set()
+        if target_loader is None:
+            history_loader = None
         if http_handler is not None or target_loader is not None:
             try:
-                actions, slots, targets = _scope(snapshot, config_hash)
+                actions, slots, targets, history_nodes = _scope(snapshot, config_hash)
             except ValueError, ValidationError, TypeError, KeyError, UnicodeError:
                 raise ExecutionError("runtime_invalid_request") from None
         try:
@@ -172,6 +188,7 @@ class RuntimeExecutor:
                     "text": text,
                     "http_bridge": http_handler is not None,
                     "handoff_bridge": target_loader is not None,
+                    "history_bridge": history_loader is not None,
                     "mock_integrations": (
                         [item.model_dump(mode="json") for item in mock_integrations]
                         if mock_integrations is not None
@@ -199,6 +216,8 @@ class RuntimeExecutor:
                         slots,
                         targets,
                         target_loader,
+                        history_nodes,
+                        history_loader,
                     )
         except TimeoutError:
             raise ExecutionError("runtime_timeout") from None
@@ -214,6 +233,8 @@ class RuntimeExecutor:
         slots: dict[str, Slot],
         targets: dict[UUID, UUID],
         target_loader: TargetLoader | None,
+        history_nodes: set[UUID],
+        history_loader: HistoryLoader | None,
     ) -> RuntimeResult:
         assert settings.encryption_key is not None
         env = {
@@ -250,6 +271,9 @@ class RuntimeExecutor:
             count = 0
             loads = 0
             scopes = {identity.version_id: (actions, slots, http_handler)}
+            history_scopes = {identity.version_id: history_nodes}
+            history_payload = None
+            history_requests = 0
             while True:
                 size = struct.unpack(">I", await process.stdout.readexactly(4))[0]
                 if not 1 <= size <= MAX_RESPONSE:
@@ -282,7 +306,7 @@ class RuntimeExecutor:
                         <= min(settings.max_model_artifact_bytes, 2**32 - 1)
                     ):
                         raise ExecutionError("runtime_invalid_model")
-                    target_actions, target_slots, references = _scope(
+                    target_actions, target_slots, references, history_nodes = _scope(
                         target.snapshot, target.config_hash
                     )
                     if any(
@@ -292,6 +316,7 @@ class RuntimeExecutor:
                         raise ExecutionError("runtime_invalid_response")
                     targets.update(references)
                     scopes[requested] = (target_actions, target_slots, target.http_handler)
+                    history_scopes[requested] = history_nodes
                     payload = json.dumps(
                         {
                             "kind": "target",
@@ -310,6 +335,18 @@ class RuntimeExecutor:
                         raise ExecutionError("runtime_invalid_request")
                     await write_packet(payload, target.model)
                     del target
+                    continue
+                if frame.get("kind") == "handoff_history" and history_loader is not None:
+                    effect = HistoryFrame.model_validate(frame)
+                    history_requests += 1
+                    if (
+                        effect.node_id not in history_scopes.get(effect.version_id, ())
+                        or history_requests > 50
+                    ):
+                        raise ExecutionError("runtime_invalid_response")
+                    if history_payload is None:
+                        history_payload = (await history_loader()).model_dump_json().encode("utf-8")
+                    await write_packet(history_payload)
                     continue
                 effect = HttpFrame.model_validate(frame)
                 action_scope = scopes.get(effect.version_id or identity.version_id)

@@ -17,6 +17,7 @@ from dialogentis.handoff import MAX_HANDOFF_DEPTH
 from dialogentis.http_action import MockIntegration
 from dialogentis.nlu.model_store import ModelIdentity, unpack_model
 from dialogentis.runtime.core import RuntimeEngine, RuntimeState
+from dialogentis.runtime.history_context import HistoryContext
 from dialogentis.runtime.nlu import nlu_predictor
 from dialogentis.versions.prepare import canonical_hash
 
@@ -76,6 +77,7 @@ def main() -> None:
     model = _read_exact(model_size)
     replies: queue.Queue = queue.Queue(maxsize=1)
     handoff = request.get("handoff_bridge") is True
+    historical = handoff and request.get("history_bridge") is True
     bridged = handoff or request.get("http_bridge") is True
     threading.Thread(
         target=_read_replies if bridged else _watch_parent,
@@ -111,6 +113,16 @@ def main() -> None:
         )
         return make_engine(target_identity, reply, target_model)
 
+    @lru_cache(maxsize=MAX_HANDOFF_DEPTH)
+    def load_history(version_id: UUID, node_id: UUID) -> HistoryContext:
+        _write_frame(
+            {"kind": "handoff_history", "version_id": str(version_id), "node_id": str(node_id)}
+        )
+        reply, extra = replies.get()
+        if extra:
+            raise ValueError("Invalid history response")
+        return HistoryContext.model_validate(reply)
+
     def make_engine(model_identity: ModelIdentity, payload: dict, artifact: bytes) -> RuntimeEngine:
         snapshot = payload["snapshot"]
         if snapshot["schema_version"] != 1 or canonical_hash(snapshot) != payload["config_hash"]:
@@ -143,6 +155,7 @@ def main() -> None:
             ),
             http_handler=http_handler if payload.get("http_bridge") is True else None,
             resolve_version=load_target if handoff else None,
+            load_history=load_history if historical else None,
         )
 
     engine = make_engine(identity, request, model)

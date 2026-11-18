@@ -62,7 +62,7 @@ def test_prompt_retry_success_and_no_input_reuse():
     engine = RuntimeEngine(
         version,
         config,
-        lambda text: calls.append(text) or Prediction(version, None, ("low_score",)),
+        lambda message: calls.append(message.text) or Prediction(version, None, ("low_score",)),
     )
     first = engine.start()
     assert first.messages == ("Укажите значение",) and first.state.pending_ask == UUID(ask["id"])
@@ -129,9 +129,9 @@ def test_entity_from_intent_message_is_exact_and_used_once():
     config["flow"]["edges"].append(edge(switch, ask, str(intent_id)))
     calls = []
 
-    def predict(text):
-        calls.append(text)
-        at = text.index("сумма")
+    def predict(message):
+        calls.append(message.text)
+        at = message.text.index("сумма")
         return Prediction(
             version, intent_id, (), (EntityValue(entity_id, at, at + 5, "сумма", "dictionary"),)
         )
@@ -160,8 +160,8 @@ def test_entity_value_can_be_taken_from_an_answer_and_bad_spans_are_rejected():
         }
     ]
 
-    def predict(text):
-        at = text.index("столица")
+    def predict(message):
+        at = message.text.index("столица")
         return Prediction(
             version,
             None,
@@ -176,8 +176,8 @@ def test_entity_value_can_be_taken_from_an_answer_and_bad_spans_are_rejected():
     bad = RuntimeEngine(
         version,
         config,
-        lambda text: replace(
-            predict(text), entities=(EntityValue(entity_id, 0, 2, "SECRET", "dictionary"),)
+        lambda message: replace(
+            predict(message), entities=(EntityValue(entity_id, 0, 2, "SECRET", "dictionary"),)
         ),
     )
     result = bad.send(bad.start().state, "столица")
@@ -231,7 +231,7 @@ def test_one_message_is_not_reused_by_a_second_ask_slot():
         if item["source"] == first_ask["id"] and item["source_handle"] == "success"
     )["target"] = second_ask["id"]
 
-    def predict(text):
+    def predict(_):
         return Prediction(
             version,
             intent_id,

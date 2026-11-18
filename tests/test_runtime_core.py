@@ -9,7 +9,13 @@ import pytest
 from dialogentis.agents import empty_config
 from dialogentis.nlu.adapter import NLUAdapter
 from dialogentis.nlu.intent import Thresholds
-from dialogentis.runtime.core import Prediction, RuntimeEngine, RuntimeFault, RuntimeState
+from dialogentis.runtime.core import (
+    Prediction,
+    RuntimeEngine,
+    RuntimeFault,
+    RuntimeInput,
+    RuntimeState,
+)
 from dialogentis.runtime.nlu import nlu_predictor
 from tests.test_nlu_intents import training_dataset
 
@@ -52,8 +58,8 @@ def test_multi_message_turns_and_version_pinned_checkpoints():
     config, intent_id = conversation_config()
     calls = []
 
-    def predict(text):
-        calls.append(text)
+    def predict(message):
+        calls.append(message.text)
         return Prediction(version, intent_id)
 
     engine = RuntimeEngine(version, config, predict)
@@ -97,8 +103,8 @@ def test_consumed_input_is_not_reused_and_known_request_resets_fallback():
     config["flow"]["edges"][-1]["target"] = switch["id"]
     calls = []
 
-    def predict(text):
-        calls.append(text)
+    def predict(message):
+        calls.append(message.text)
         return (
             Prediction(version, None, ("low_score",))
             if len(calls) == 1
@@ -161,15 +167,17 @@ def test_nlu_failure_and_invalid_results_are_safe():
     version = uuid4()
     config, intent_id = conversation_config()
 
-    def broken(text):
-        raise ValueError(f"PRIVATE_SENTINEL {text}")
+    def broken(message):
+        raise ValueError(f"PRIVATE_SENTINEL {message.text}")
 
     engine = RuntimeEngine(version, config, broken)
     result = engine.send(engine.start().state, "PRIVATE_SENTINEL")
     assert result.error_code == "nlu_error" and "PRIVATE_SENTINEL" not in repr(asdict(result))
     engine = RuntimeEngine(version, config, lambda _: Prediction(version, intent_id, ("private",)))
     assert engine.send(engine.start().state, "запрос").error_code == "invalid_nlu_result"
-    engine = RuntimeEngine(version, config, cast(Callable[[str], Prediction], lambda _: None))
+    engine = RuntimeEngine(
+        version, config, cast(Callable[[RuntimeInput], Prediction], lambda _: None)
+    )
     assert engine.send(engine.start().state, "запрос").error_code == "invalid_nlu_result"
 
 

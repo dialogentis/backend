@@ -1,12 +1,19 @@
 from datetime import datetime, timedelta
 from uuid import UUID
 
-from sqlalchemy import delete, func, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from dialogentis.config import Settings
 from dialogentis.models import Organization
 from dialogentis.runtime.core import RuntimeResult
+from dialogentis.runtime.history_context import (
+    MAX_HISTORY_MESSAGES,
+    ContextMessage,
+    HistoryContext,
+    recent_history,
+)
+from dialogentis.runtime.history_filters import history_cutoff
 from dialogentis.runtime.history_models import ConversationHistory, HistoryTurn
 from dialogentis.runtime.models import TestConversation
 from dialogentis.runtime.receipts import ReceiptIdentity, ReceiptPayload, open_receipt, seal_receipt
@@ -90,6 +97,40 @@ def read_messages(turn: HistoryTurn, settings: Settings) -> ReceiptPayload | Non
         settings,
         purpose=PURPOSE,
     )
+
+
+async def load_dialogue_context(
+    db: AsyncSession,
+    org: Organization,
+    conversation_id: UUID,
+    before_sequence: int,
+    settings: Settings,
+) -> HistoryContext:
+    if not org.store_message_text:
+        return HistoryContext()
+    turns = await db.scalars(
+        select(HistoryTurn)
+        .where(
+            HistoryTurn.organization_id == org.id,
+            HistoryTurn.conversation_id == conversation_id,
+            HistoryTurn.sequence < before_sequence,
+            HistoryTurn.created_at > history_cutoff(org),
+            HistoryTurn.encrypted_messages.is_not(None),
+        )
+        .order_by(HistoryTurn.sequence.desc())
+        .limit(MAX_HISTORY_MESSAGES + 1)
+    )
+
+    def newest_first():
+        for turn in turns:
+            saved = read_messages(turn, settings)
+            if saved is not None:
+                for message in reversed(saved.messages):
+                    yield ContextMessage(role="agent", text=message)
+                if saved.input_text is not None:
+                    yield ContextMessage(role="user", text=saved.input_text)
+
+    return recent_history(newest_first())
 
 
 async def cleanup_history(db: AsyncSession, org: Organization, *, purge_text: bool = False) -> None:

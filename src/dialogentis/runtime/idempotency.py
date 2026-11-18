@@ -94,6 +94,7 @@ async def reserve_initial_turn(
         or initial.pending_ask is not None
         or initial.attempts
         or initial.active_path
+        or initial.history_sources
         or initial.callers
     ):
         raise ValueError("Invalid initial state")

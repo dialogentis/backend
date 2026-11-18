@@ -24,6 +24,7 @@ from dialogentis.http_action import (
     MockIntegration,
     mock_http_action,
 )
+from dialogentis.runtime.history_context import HistoryContext
 from dialogentis.runtime.slot_values import SlotValueError, parse_slot_value, valid_value
 from dialogentis.set_slot import SetSlotConfig
 from dialogentis.slots import Slot, validate_slots
@@ -59,6 +60,12 @@ class Prediction:
     entities: tuple[EntityValue, ...] = field(default=(), repr=False)
 
 
+@dataclass(frozen=True)
+class RuntimeInput:
+    text: str = field(repr=False)
+    history: HistoryContext = field(default_factory=HistoryContext, repr=False)
+
+
 class FrameState(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     node_id: UUID
@@ -80,6 +87,7 @@ class RuntimeState(FrameState):
     status: Literal["waiting_input", "completed", "failed"]
     turn: int = Field(ge=0)
     active_path: tuple[UUID, ...] = Field(default=(), max_length=MAX_HANDOFF_DEPTH)
+    history_sources: tuple[UUID | None, ...] = Field(default=(), max_length=MAX_HANDOFF_DEPTH)
     callers: tuple[SuspendedFrame, ...] = Field(
         default=(), max_length=MAX_HANDOFF_DEPTH, repr=False
     )
@@ -147,11 +155,12 @@ class RuntimeEngine:
         self,
         version_id: UUID,
         config: dict,
-        predict: Callable[[str], Prediction],
+        predict: Callable[[RuntimeInput], Prediction],
         *,
         mock_integrations: list[MockIntegration] | None = None,
         http_handler: Callable[[UUID, dict], tuple[str, dict]] | None = None,
         resolve_version: Callable[[UUID], RuntimeEngine | None] | None = None,
+        load_history: Callable[[UUID, UUID], HistoryContext] | None = None,
     ):
         errors, _ = validate_flow(config)
         if errors:
@@ -195,6 +204,7 @@ class RuntimeEngine:
         )
         self._http_handler = http_handler
         self._resolve_version = resolve_version
+        self._load_history = load_history
         self._handoffs = {
             node.id: HandoffConfig.model_validate(node.config)
             for node in self._flow.nodes
@@ -243,6 +253,19 @@ class RuntimeEngine:
         path = [self, *(self._target(version) for version in state.active_path)]
         if len({engine._version for engine in path}) != len(path):  # noqa: SLF001
             raise RuntimeFault("invalid_checkpoint")
+        history_sources = state.history_sources or (None,) * len(state.active_path)
+        if len(history_sources) != len(state.active_path):
+            raise RuntimeFault("invalid_checkpoint")
+        for index, source in enumerate(history_sources):
+            if source is None:
+                continue
+            handoff = path[index]._handoffs.get(source)  # noqa: SLF001
+            if (
+                handoff is None
+                or not handoff.include_history
+                or handoff.target_version_id != state.active_path[index]
+            ):
+                raise RuntimeFault("invalid_checkpoint")
         indices = [frame.path_index for frame in state.callers]
         if indices != sorted(set(indices)) or any(index >= len(path) - 1 for index in indices):
             raise RuntimeFault("invalid_checkpoint")
@@ -277,6 +300,7 @@ class RuntimeEngine:
             state.pending_ask,
             path,
             list(state.callers),
+            list(history_sources),
         )
 
     def _target(self, version_id: UUID) -> RuntimeEngine:
@@ -328,6 +352,7 @@ class RuntimeEngine:
         pending_ask: UUID | None,
         path: list[RuntimeEngine] | None = None,
         callers: list[SuspendedFrame] | None = None,
+        history_sources: list[UUID | None] | None = None,
     ) -> RuntimeResult:
         messages: list[str] = []
         trace: list[TraceEvent] = []
@@ -339,7 +364,9 @@ class RuntimeEngine:
         entity_consumed = False
         path = path if path is not None else [self]
         callers = callers if callers is not None else []
+        history_sources = history_sources if history_sources is not None else []
         active = path[-1]
+        active_history: HistoryContext | None = None
         input_consumed = False
         private_input = False
         private_values: set[str] = set()
@@ -399,6 +426,9 @@ class RuntimeEngine:
                 active_path=tuple(engine._version for engine in path[1:])
                 if status == "waiting_input"
                 else (),
+                history_sources=tuple(history_sources)
+                if status == "waiting_input" and any(history_sources)
+                else (),
                 callers=tuple(callers) if status == "waiting_input" else (),
             )
 
@@ -426,8 +456,15 @@ class RuntimeEngine:
             return target
 
         def predict_message(message: str) -> Prediction:
+            nonlocal active_history
+            if active_history is None:
+                active_history = (
+                    self._load_history(path[-2]._version, source)
+                    if history_sources and (source := history_sources[-1]) and self._load_history
+                    else HistoryContext()
+                )
             try:
-                prediction = active._predict(message)
+                prediction = active._predict(RuntimeInput(message, active_history))
             except Exception:
                 raise RuntimeFault("nlu_error") from None
             # shortcut: synchronous prediction needs a preemptive outer timeout.
@@ -716,6 +753,19 @@ class RuntimeEngine:
                     if transitions > MAX_TRANSITIONS:
                         raise RuntimeFault("transition_limit")
                     record(TraceEvent(node.id, node.type, "handoff", str(target._version)))
+                    history_sources.append(node.id if config.include_history else None)
+                    active_history = HistoryContext()
+                    if config.include_history:
+                        if turn > 0 and self._load_history is not None:
+                            active_history = self._load_history(active._version, node.id)
+                        event = (
+                            "handoff_history_truncated"
+                            if active_history.truncated
+                            else "handoff_history"
+                        )
+                        record(
+                            TraceEvent(node.id, node.type, event, str(len(active_history.messages)))
+                        )
                     if config.mode == "call":
                         callers.append(
                             SuspendedFrame(
@@ -758,7 +808,9 @@ class RuntimeEngine:
                         branch = "error"
                     record(TraceEvent(node.id, node.type, "returned", str(parent._version)))
                     del path[caller.path_index + 1 :]
+                    del history_sources[caller.path_index :]
                     active = parent
+                    active_history = None
                     node_id = caller.node_id
                     values, attempts = restored, dict(caller.attempts)
                     fallback_count, pending_ask = caller.fallback_count, caller.pending_ask
