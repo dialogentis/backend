@@ -9,18 +9,22 @@ from fastapi import HTTPException
 from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from dialogentis.channels.api_access import ApiAccess
 from dialogentis.config import Settings
 from dialogentis.integrations.ledger_models import ActionExecution
 from dialogentis.models import Organization, User
 from dialogentis.organizations import organization_context
 from dialogentis.runtime.checkpoint import decrypt_checkpoint, encrypt_checkpoint
 from dialogentis.runtime.conversations import (
+    Principal,
     TurnReservation,
+    _access,
     _check_terminal,
     _identity,
     _locked_row,
     commit_turn,
     create_conversation,
+    created_by,
     reserve_turn,
 )
 from dialogentis.runtime.core import RuntimeResult, RuntimeState, TraceEvent
@@ -69,7 +73,7 @@ class ReplayedStart:
 
 async def reserve_initial_turn(
     db: AsyncSession,
-    user: User,
+    user: Principal,
     organization_id: UUID,
     agent_id: UUID,
     version_id: UUID,
@@ -78,6 +82,7 @@ async def reserve_initial_turn(
     *,
     idempotency_key: str | None = None,
     http_mode: str = "mock",
+    release_id: UUID | None = None,
 ) -> ReservedStart | ReplayedStart:
     """Reserve a private initial turn; a caller must commit before executing it."""
     if (
@@ -95,13 +100,10 @@ async def reserve_initial_turn(
     conversation_id, message_id, credential = start_identity(
         settings, organization_id, user.id, agent_id, key
     )
-    await organization_context(
-        db,
-        user,
-        organization_id,
-        "manage_integrations" if http_mode == "live" else None,
-        lock=True,
-    )
+    if isinstance(user, User) and http_mode == "live":
+        await organization_context(db, user, organization_id, "manage_integrations", lock=True)
+    else:
+        await _access(db, user, organization_id)
     row = await db.get(TestConversation, conversation_id)
     receipt = await db.scalar(
         select(RuntimeReceipt.id).where(
@@ -113,12 +115,14 @@ async def reserve_initial_turn(
     if row is not None:
         if (
             row.agent_id != agent_id
-            or row.created_by != user.id
+            or row.created_by != created_by(user)
+            or row.api_key_id != (user.id if isinstance(user, ApiAccess) else None)
+            or row.release_id != release_id
             or row.version_id != version_id
             or row.http_mode != http_mode
         ):
             raise HTTPException(409, "Ключ уже использован для другого диалога")
-        if row.revision != 1 or receipt is None:
+        if (row.revision != 1 and isinstance(user, User)) or receipt is None:
             raise HTTPException(409, "Диалог изменился или результат запуска недоступен")
         replay = await reserve_message(
             db,
@@ -148,6 +152,7 @@ async def reserve_initial_turn(
         conversation_id=conversation_id,
         credential=credential,
         http_mode=http_mode,
+        release_id=release_id,
     )
     assert created.credential is not None
     turn = await reserve_message(
@@ -168,7 +173,7 @@ async def reserve_initial_turn(
 
 async def complete_initial_turn(
     db: AsyncSession,
-    user: User,
+    user: Principal,
     organization_id: UUID,
     reserved: ReservedStart,
     result: RuntimeResult,
@@ -186,7 +191,7 @@ async def complete_initial_turn(
             RuntimeReceipt.id == turn.turn_id,
             RuntimeReceipt.organization_id == organization_id,
             RuntimeReceipt.conversation_id == row.id,
-            RuntimeReceipt.created_by == user.id,
+            RuntimeReceipt.created_by == created_by(user),
         )
         .with_for_update()
     )
@@ -261,11 +266,11 @@ async def complete_initial_turn(
 
 async def reserve_message(
     db: AsyncSession,
-    user: User,
+    user: Principal,
     organization_id: UUID,
     conversation_id: UUID,
     credential: str,
-    revision: int,
+    revision: int | None,
     message_id: UUID,
     idempotency_key: str,
     text: str,
@@ -279,7 +284,7 @@ async def reserve_message(
     row, now = await _locked_row(
         db, user, organization_id, conversation_id, credential, allow_terminal=True
     )
-    if row.http_mode == "live":
+    if isinstance(user, User) and row.http_mode == "live":
         await organization_context(db, user, organization_id, "manage_integrations", lock=True)
     matches = (
         await db.scalars(
@@ -343,7 +348,7 @@ async def reserve_message(
             id=turn_id,
             organization_id=organization_id,
             conversation_id=conversation_id,
-            created_by=user.id,
+            created_by=created_by(user),
             credential_hash=row.credential_hash,
             client_message_id=message_id,
             idempotency_key_hash=key_hash,
@@ -360,7 +365,7 @@ async def reserve_message(
 
 async def complete_message(
     db: AsyncSession,
-    user: User,
+    user: Principal,
     organization_id: UUID,
     conversation_id: UUID,
     credential: str,
@@ -375,7 +380,7 @@ async def complete_message(
             RuntimeReceipt.id == reserved.turn_id,
             RuntimeReceipt.organization_id == organization_id,
             RuntimeReceipt.conversation_id == conversation_id,
-            RuntimeReceipt.created_by == user.id,
+            RuntimeReceipt.created_by == created_by(user),
         )
         .with_for_update()
     )

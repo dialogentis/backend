@@ -1,5 +1,6 @@
 import asyncio
 import os
+from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 import pytest
@@ -10,8 +11,9 @@ from dialogentis.db import unit_of_work
 from dialogentis.deletion_worker import purge_tenant
 from dialogentis.jobs.tasks import process_job
 from dialogentis.jobs.training_tasks import HANDLERS
-from dialogentis.models import AgentDraft, Membership
+from dialogentis.models import AgentDraft, Membership, Organization
 from dialogentis.organizations import AuditEvent
+from dialogentis.runtime.rate_limits import RateBucket
 from dialogentis.versions.release_models import Release, ReleaseVersion
 from tests.test_auth import client_for
 from tests.test_exports import app as app
@@ -26,7 +28,7 @@ pytestmark = [
 
 
 async def test_release_gates_atomic_publication_pins_and_rollback(app):
-    async with client_for(app) as owner, client_for(app) as editor:
+    async with client_for(app) as owner, client_for(app) as editor, client_for(app) as public:
         owner_id, org_id, root_id = await create_agent(app, owner)
         editor_id, other_org, _ = await create_agent(app, editor)
         base = f"/api/v1/organizations/{org_id}/agents"
@@ -141,6 +143,30 @@ async def test_release_gates_atomic_publication_pins_and_rollback(app):
             str(target_version),
         }
         assert (await owner.post(f"{target_url}/archive")).status_code == 409
+        issued = await owner.post(f"{root_url}/api-keys", json={"name": "Client"})
+        issued_other = await owner.post(f"{root_url}/api-keys", json={"name": "Other client"})
+        assert issued.status_code == issued_other.status_code == 201
+        auth = {"Authorization": f"Bearer {issued.json()['secret']}"}
+        other_auth = {"Authorization": f"Bearer {issued_other.json()['secret']}"}
+        runtime = "/api/v1/runtime"
+        start_path = f"{runtime}/agents/{root_id}/conversations"
+
+        async def start_public(key, credentials=auth):
+            return await public.post(start_path, headers={**credentials, "Idempotency-Key": key})
+
+        assert (await start_public("no-key", {})).status_code == 401
+        assert (
+            await public.post(
+                f"{runtime}/agents/{target_id}/conversations",
+                headers={**auth, "Idempotency-Key": "wrong-agent"},
+            )
+        ).status_code == 404
+        public_started = await start_public("first-public")
+        assert public_started.status_code == 201, public_started.text
+        original = public_started.json()
+        assert original["release_id"] == release_a["id"]
+        assert [message["text"] for message in original["messages"]] == ["Где заказ 321?"]
+        assert "trace" not in original and "revision" not in original
 
         # Publish a root version that no longer calls the target.
         root["flow"]["edges"][0]["target"] = root["flow"]["nodes"][3]["id"]
@@ -161,6 +187,52 @@ async def test_release_gates_atomic_publication_pins_and_rollback(app):
         assert second.status_code == 201, second.text
         assert (await owner.post(f"{target_url}/archive")).status_code == 200
         assert (await say(old_chat, "Сегодня"))["messages"] == ["Доставка: Сегодня / важно"]
+        replacement = await start_public("replacement")
+        assert replacement.status_code == 201, replacement.text
+        assert replacement.json()["release_id"] == second.json()["id"]
+        retried_start = (await start_public("first-public")).json()
+        assert retried_start["replayed"] and retried_start["release_id"] == release_a["id"]
+        assert retried_start["conversation_token"] == original["conversation_token"]
+
+        conversation_path = f"{runtime}/conversations/{original['conversation_id']}"
+        token = {"X-Conversation-Token": original["conversation_token"]}
+        message = {"client_message_id": str(uuid4()), "text": "Сегодня"}
+        headers = {**auth, **token, "Idempotency-Key": "message-a"}
+        assert (
+            await public.post(
+                f"{conversation_path}/messages", json=message, headers={**headers, **other_auth}
+            )
+        ).status_code == 404
+        assert (
+            await public.post(
+                f"{conversation_path}/messages",
+                json=message,
+                headers={
+                    **headers,
+                    "X-Conversation-Token": replacement.json()["conversation_token"],
+                },
+            )
+        ).status_code == 404
+        sent = await public.post(f"{conversation_path}/messages", json=message, headers=headers)
+        assert sent.status_code == 200, sent.text
+        result = sent.json()
+        assert result["sequence"] == 1 and "trace" not in result
+        assert [item["text"] for item in result["messages"]] == ["Доставка: Сегодня / важно"]
+        repeat = await public.post(f"{conversation_path}/messages", json=message, headers=headers)
+        assert repeat.json()["replayed"] and repeat.json()["messages"] == result["messages"]
+        assert (
+            await public.post(
+                f"{conversation_path}/messages", json={**message, "text": "Завтра"}, headers=headers
+            )
+        ).status_code == 409
+        receipt_path = f"{conversation_path}/receipt/{message['client_message_id']}"
+        receipt = await public.get(receipt_path, headers={**auth, **token})
+        assert receipt.json() == {
+            "turn_id": result["turn_id"],
+            "sequence": 1,
+            "status": "completed",
+        }
+        assert (await public.post(f"{conversation_path}/close", headers=headers)).status_code == 204
         undo = {"release_id": release_a["id"], "reason": "Возвращаем проверенный сценарий"}
         assert (
             await owner.post(
@@ -172,6 +244,48 @@ async def test_release_gates_atomic_publication_pins_and_rollback(app):
             f"{root_url}/rollback", json=undo, headers={"If-Match": second.headers["etag"]}
         )
         assert rolled.status_code == 200 and rolled.json()["current_release_id"] == release_a["id"]
+        async with unit_of_work(app.state.session_factory, organization_id=org_id) as db:
+            org = await db.get(Organization, org_id)
+            assert org is not None
+            org.store_message_text = False
+        private = (await start_public("after-rollback")).json()
+        assert private["release_id"] == release_a["id"]
+        assert [item["text"] for item in private["messages"]] == ["Где заказ 321?"]
+        assert (await start_public("after-rollback")).json()["messages"] == []
+        private_path = f"{runtime}/conversations/{private['conversation_id']}"
+        private_headers = {**headers, "X-Conversation-Token": private["conversation_token"]}
+        delivered = await public.post(
+            f"{private_path}/messages", json=message, headers=private_headers
+        )
+        assert delivered.status_code == 200
+        assert delivered.json()["messages"][0]["text"] == "Доставка: Сегодня / важно"
+        privacy_replay = (
+            await public.post(f"{private_path}/messages", json=message, headers=private_headers)
+        ).json()
+        assert privacy_replay["replayed"] and not privacy_replay["replay_available"]
+        assert privacy_replay["messages"] == []
+        async with unit_of_work(app.state.session_factory, organization_id=org_id) as db:
+            bucket = await db.get(RateBucket, (org_id, f"start:key:{issued.json()['id']}"))
+            assert bucket is not None
+            bucket.available_at = datetime.now(UTC) + timedelta(seconds=30)
+        limited = await start_public("limited")
+        assert limited.status_code == 429, limited.text
+        assert limited.headers["retry-after"] == "1"
+        assert (await start_public("first-public")).json()["replayed"]
+        async with unit_of_work(app.state.session_factory, organization_id=org_id) as db:
+            bucket = await db.get(RateBucket, (org_id, "start:organization"))
+            assert bucket is not None
+            bucket.available_at = datetime.now(UTC) + timedelta(seconds=30)
+        assert (await start_public("limited-other-key", other_auth)).status_code == 429
+        assert (
+            await owner.post(f"{root_url}/api-keys/{issued.json()['id']}/revoke")
+        ).status_code == 204
+        assert (await start_public("revoked")).status_code == 401
+        assert (await public.get(receipt_path, headers={**auth, **token})).status_code == 401
+        assert (await public.post(f"{conversation_path}/close", headers=headers)).status_code == 401
+        assert (
+            await public.post(f"{conversation_path}/messages", json=message, headers=headers)
+        ).status_code == 401
         assert (await owner.get(root_url)).json()["current_release_id"] == release_a["id"]
         history = (await owner.get(publish_url)).json()["items"]
         assert history == [second.json(), release_a]

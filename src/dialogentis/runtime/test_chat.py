@@ -3,6 +3,7 @@
 import asyncio
 from collections.abc import Coroutine
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 from uuid import UUID
 
@@ -12,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from dialogentis.artifact_service import read_artifact
 from dialogentis.artifacts import ArtifactStorage
+from dialogentis.channels.api_access import ApiAccess
 from dialogentis.config import Settings
 from dialogentis.datasets.validation import Issue
 from dialogentis.db import unit_of_work
@@ -21,7 +23,7 @@ from dialogentis.integrations.models import Integration
 from dialogentis.jobs.models import Job
 from dialogentis.models import Agent, User
 from dialogentis.nlu.model_store import ModelIdentity
-from dialogentis.organizations import organization_context
+from dialogentis.runtime.conversations import Principal, _access
 from dialogentis.runtime.core import Prediction, RuntimeEngine, RuntimeResult, TraceEvent
 from dialogentis.runtime.executor import ExecutionError, HttpHandler, RuntimeExecutor, RuntimeTarget
 from dialogentis.runtime.idempotency import (
@@ -35,9 +37,16 @@ from dialogentis.runtime.idempotency import (
 from dialogentis.runtime.limits import run_limited
 from dialogentis.runtime.live_http import LiveHttpTurn
 from dialogentis.runtime.models import TestConversation
+from dialogentis.runtime.rate_limits import limit_api_turn
+from dialogentis.runtime.receipts import start_identity
 from dialogentis.slots import validate_slots
 from dialogentis.versions.models import AgentVersion
 from dialogentis.versions.prepare import version_status
+from dialogentis.versions.release_check import ReleasePin
+from dialogentis.versions.release_models import Release
+
+type Actor = UUID | ApiAccess
+type Manifest = dict[tuple[UUID, UUID], ReleasePin]
 
 
 @dataclass(frozen=True)
@@ -52,6 +61,8 @@ class ChatResponse:
     turn_id: UUID | None = None
     replayed: bool = False
     replay_available: bool = False
+    release_id: UUID | None = None
+    expires_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -92,16 +103,29 @@ class TestChatService:
         if pending:
             await asyncio.gather(*pending, return_exceptions=True)
 
-    async def _user(self, db: AsyncSession, user_id: UUID) -> User:
+    async def _user(self, db: AsyncSession, user_id: Actor) -> Principal:
+        if isinstance(user_id, ApiAccess):
+            return user_id
         user = await db.get(User, user_id)
         if user is None or not user.email_verified:
             raise HTTPException(403, "Подтвердите адрес почты")
         return user
 
     async def _bundle(
-        self, db: AsyncSession, user: User, org_id: UUID, agent_id: UUID, version_id: UUID
+        self,
+        db: AsyncSession,
+        user: Principal,
+        org_id: UUID,
+        agent_id: UUID,
+        version_id: UUID,
+        manifest: Manifest | None = None,
     ) -> _Bundle:
-        await organization_context(db, user, org_id, lock=True)
+        await _access(db, user, org_id)
+        pin = None
+        if manifest is not None:
+            pin = manifest.get((agent_id, version_id))
+            if pin is None:
+                raise HTTPException(404, "Версия отсутствует в публикации")
         pair = (
             await db.execute(
                 select(AgentVersion, Job)
@@ -119,6 +143,11 @@ class TestChatService:
         version, job = pair
         if version_status(version, job) != "ready" or version.model_artifact_id is None:
             raise HTTPException(409, "Версия агента ещё не готова")
+        if pin and (
+            pin.model_artifact_id != version.model_artifact_id
+            or pin.config_hash != version.config_hash
+        ):
+            raise ExecutionError("runtime_invalid_request")
         errors, _ = await asyncio.to_thread(validate_flow, version.snapshot["config"])
         if errors:
             raise InvalidVersionFlow(errors)
@@ -153,20 +182,25 @@ class TestChatService:
     async def _execute(
         self,
         action: str,
-        user_id: UUID,
+        user_id: Actor,
         org_id: UUID,
         agent_id: UUID,
         version_id: UUID,
         state=None,
         text=None,
         live_http: LiveHttpTurn | None = None,
+        manifest: Manifest | None = None,
     ) -> RuntimeResult:
         async def work() -> RuntimeResult:
-            async with unit_of_work(self.factory, organization_id=org_id, user_id=user_id) as db:
+            async with unit_of_work(
+                self.factory, organization_id=org_id, user_id=session_user(user_id)
+            ) as db:
                 bundle = await self._bundle(
-                    db, await self._user(db, user_id), org_id, agent_id, version_id
+                    db, await self._user(db, user_id), org_id, agent_id, version_id, manifest
                 )
-            return await self._execute_in_slot(action, bundle, user_id, state, text, live_http)
+            return await self._execute_in_slot(
+                action, bundle, user_id, state, text, live_http, manifest
+            )
 
         try:
             async with asyncio.timeout(20):
@@ -215,19 +249,20 @@ class TestChatService:
         self,
         action: str,
         bundle: _Bundle,
-        user_id: UUID,
+        user_id: Actor,
         state=None,
         text=None,
         live_http: LiveHttpTurn | None = None,
+        manifest: Manifest | None = None,
     ) -> RuntimeResult:
         async def load_target(agent_id: UUID, version_id: UUID) -> RuntimeTarget | None:
             org_id = bundle.identity.organization_id
             try:
                 async with unit_of_work(
-                    self.factory, organization_id=org_id, user_id=user_id
+                    self.factory, organization_id=org_id, user_id=session_user(user_id)
                 ) as db:
                     target = await self._bundle(
-                        db, await self._user(db, user_id), org_id, agent_id, version_id
+                        db, await self._user(db, user_id), org_id, agent_id, version_id, manifest
                     )
             except InvalidVersionFlow:
                 return None
@@ -288,29 +323,56 @@ class TestChatService:
             self._start(user_id, org_id, agent_id, version_id, idempotency_key, http_mode)
         )
 
+    async def start_public(self, access: ApiAccess, idempotency_key: str) -> ChatResponse:
+        return await self._run_detached(
+            self._start(
+                access, access.organization_id, access.agent_id, None, idempotency_key, "live"
+            )
+        )
+
     async def _start(
         self,
-        user_id: UUID,
+        user_id: Actor,
         org_id: UUID,
         agent_id: UUID,
-        version_id: UUID,
+        version_id: UUID | None,
         idempotency_key: str | None,
         http_mode: str,
     ) -> ChatResponse:
         deadline = asyncio.get_running_loop().time() + 20
 
         async def work() -> ChatResponse:
-            async with unit_of_work(self.factory, organization_id=org_id, user_id=user_id) as db:
+            async with unit_of_work(
+                self.factory, organization_id=org_id, user_id=session_user(user_id)
+            ) as db:
                 user = await self._user(db, user_id)
-                bundle = await self._bundle(db, user, org_id, agent_id, version_id)
+                selected = version_id
+                release_id = None
+                manifest = None
+                existing = None
+                if isinstance(user, ApiAccess):
+                    await user.authorize(db)
+                    assert idempotency_key is not None
+                    conversation_id, _, _ = start_identity(
+                        self.settings, org_id, user.id, agent_id, idempotency_key
+                    )
+                    existing = await db.get(TestConversation, conversation_id)
+                else:
+                    await _access(db, user, org_id)
                 agent = await db.get(Agent, agent_id)
-                if agent is None or agent.status != "active":
+                if agent is None or (agent.status != "active" and existing is None):
                     raise HTTPException(409, "Архивный агент недоступен для нового диалога")
+                if isinstance(user, ApiAccess):
+                    release_id = existing.release_id if existing else agent.current_release_id
+                    release, manifest = await load_release(db, org_id, agent_id, release_id)
+                    selected = release.root_version_id
+                assert selected is not None
+                bundle = await self._bundle(db, user, org_id, agent_id, selected, manifest)
                 initial = await asyncio.to_thread(
                     lambda: RuntimeEngine(
-                        version_id,
+                        selected,
                         bundle.snapshot["config"],
-                        lambda _: Prediction(version_id, None),
+                        lambda _: Prediction(selected, None),
                     ).initial_state()
                 )
                 reserved = await reserve_initial_turn(
@@ -318,12 +380,15 @@ class TestChatService:
                     user,
                     org_id,
                     agent_id,
-                    version_id,
+                    selected,
                     initial,
                     self.settings,
                     idempotency_key=idempotency_key,
                     http_mode=http_mode,
+                    release_id=release_id,
                 )
+                if isinstance(user, ApiAccess) and not isinstance(reserved, ReplayedStart):
+                    await limit_api_turn(db, org_id, user.id, start=True)
             replayed = isinstance(reserved, ReplayedStart)
             if isinstance(reserved, ReplayedStart):
                 saved = reserved.result
@@ -333,13 +398,22 @@ class TestChatService:
                     if http_mode == "live"
                     else None
                 )
-                result = await self._execute_in_slot("start", bundle, user_id, live_http=live_http)
+                result = await self._execute_in_slot(
+                    "start", bundle, user_id, live_http=live_http, manifest=manifest
+                )
                 async with unit_of_work(
-                    self.factory, organization_id=org_id, user_id=user_id
+                    self.factory, organization_id=org_id, user_id=session_user(user_id)
                 ) as db:
                     saved = await complete_initial_turn(
                         db, await self._user(db, user_id), org_id, reserved, result, self.settings
                     )
+            expires_at = None
+            if release_id is not None:
+                async with unit_of_work(self.factory, organization_id=org_id) as db:
+                    row = await db.get(TestConversation, reserved.conversation_id)
+                    if row is None:
+                        raise HTTPException(404, "Диалог не найден")
+                    expires_at = row.idle_expires_at
             return ChatResponse(
                 reserved.conversation_id,
                 saved.revision,
@@ -351,6 +425,8 @@ class TestChatService:
                 saved.turn_id,
                 replayed=replayed,
                 replay_available=saved.replay_available,
+                release_id=release_id,
+                expires_at=expires_at,
             )
 
         try:
@@ -376,10 +452,10 @@ class TestChatService:
 
     async def send(
         self,
-        user_id: UUID,
+        user_id: Actor,
         org_id: UUID,
         conversation_id: UUID,
-        revision: int,
+        revision: int | None,
         text: str,
         credential: str,
         message_id: UUID,
@@ -400,10 +476,10 @@ class TestChatService:
 
     async def _send(
         self,
-        user_id: UUID,
+        user_id: Actor,
         org_id: UUID,
         conversation_id: UUID,
-        revision: int,
+        revision: int | None,
         text: str,
         credential: str,
         message_id: UUID,
@@ -418,9 +494,11 @@ class TestChatService:
         try:
             async with asyncio.timeout(25):
                 async with unit_of_work(
-                    self.factory, organization_id=org_id, user_id=user_id
+                    self.factory, organization_id=org_id, user_id=session_user(user_id)
                 ) as db:
                     user = await self._user(db, user_id)
+                    if isinstance(user, ApiAccess):
+                        await user.authorize(db)
                     reserved = await reserve_message(
                         db,
                         user,
@@ -433,6 +511,8 @@ class TestChatService:
                         text,
                         self.settings,
                     )
+                    if isinstance(user, ApiAccess) and not isinstance(reserved, Replay):
+                        await limit_api_turn(db, org_id, user.id, start=False)
                 if isinstance(reserved, Replay):
                     return ChatResponse(
                         conversation_id,
@@ -446,13 +526,16 @@ class TestChatService:
                         replay_available=reserved.replay_available,
                     )
                 async with unit_of_work(
-                    self.factory, organization_id=org_id, user_id=user_id
+                    self.factory, organization_id=org_id, user_id=session_user(user_id)
                 ) as db:
                     await self._user(db, user_id)
                     row = await db.get(TestConversation, conversation_id)
-                    if row is None or row.created_by != user_id:
+                    if row is None:
                         raise HTTPException(404, "Диалог не найден")
                     agent_id, version_id, http_mode = row.agent_id, row.version_id, row.http_mode
+                    manifest = None
+                    if row.release_id is not None:
+                        _, manifest = await load_release(db, org_id, agent_id, row.release_id)
                 live_http = (
                     LiveHttpTurn(
                         org_id,
@@ -473,9 +556,10 @@ class TestChatService:
                     reserved.reservation.state,
                     text,
                     live_http,
+                    manifest,
                 )
                 async with unit_of_work(
-                    self.factory, organization_id=org_id, user_id=user_id
+                    self.factory, organization_id=org_id, user_id=session_user(user_id)
                 ) as db:
                     saved = await complete_message(
                         db,
@@ -499,3 +583,23 @@ class TestChatService:
                 )
         except TimeoutError:
             raise ExecutionError("runtime_request_timeout") from None
+
+
+def session_user(actor: Actor) -> UUID | None:
+    return actor if isinstance(actor, UUID) else None
+
+
+async def load_release(
+    db: AsyncSession, org_id: UUID, agent_id: UUID, release_id: UUID | None
+) -> tuple[Release, Manifest]:
+    release = await db.scalar(
+        select(Release).where(
+            Release.id == release_id,
+            Release.organization_id == org_id,
+            Release.agent_id == agent_id,
+        )
+    )
+    if release is None:
+        raise HTTPException(409, "У агента нет доступной публикации")
+    pins = [ReleasePin.model_validate(item) for item in release.dependency_manifest]
+    return release, {(pin.agent_id, pin.version_id): pin for pin in pins}

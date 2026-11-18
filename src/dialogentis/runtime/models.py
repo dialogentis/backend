@@ -1,4 +1,4 @@
-"""Encrypted state of an internal management test conversation."""
+"""Encrypted state shared by management and published conversations."""
 
 from datetime import datetime
 from uuid import UUID
@@ -25,7 +25,9 @@ class TestConversation(Base):
     organization_id: Mapped[UUID] = mapped_column(ForeignKey("organizations.id"))
     agent_id: Mapped[UUID] = mapped_column()
     version_id: Mapped[UUID] = mapped_column()
-    created_by: Mapped[UUID] = mapped_column(ForeignKey("users.id"))
+    created_by: Mapped[UUID | None] = mapped_column(ForeignKey("users.id"))
+    api_key_id: Mapped[UUID | None] = mapped_column()
+    release_id: Mapped[UUID | None] = mapped_column()
     checkpoint: Mapped[bytes | None] = mapped_column(LargeBinary)
     http_mode: Mapped[str] = mapped_column(String(4), default="mock", server_default="mock")
     credential_hash: Mapped[str | None] = mapped_column(String(64))
@@ -38,11 +40,27 @@ class TestConversation(Base):
 
     __table_args__ = (
         ForeignKeyConstraint(
+            ["organization_id", "agent_id", "api_key_id"],
+            ["agent_api_keys.organization_id", "agent_api_keys.agent_id", "agent_api_keys.id"],
+            name="fk_conversations_api_key_id",
+        ),
+        ForeignKeyConstraint(
+            ["organization_id", "agent_id", "release_id"],
+            ["releases.organization_id", "releases.agent_id", "releases.id"],
+            name="fk_conversations_release_id",
+        ),
+        ForeignKeyConstraint(
             ["organization_id", "agent_id", "version_id"],
             ["agent_versions.organization_id", "agent_versions.agent_id", "agent_versions.id"],
             ondelete="CASCADE",
         ),
         CheckConstraint("revision > 0"),
+        CheckConstraint(
+            "(created_by IS NOT NULL AND api_key_id IS NULL AND release_id IS NULL) OR "
+            "(created_by IS NULL AND api_key_id IS NOT NULL AND release_id IS NOT NULL "
+            "AND http_mode = 'live')",
+            name="ck_conversations_principal",
+        ),
         CheckConstraint("http_mode IN ('mock', 'live')", name="ck_test_conversations_http_mode"),
         CheckConstraint(
             "credential_hash IS NULL OR credential_hash ~ '^[0-9a-f]{64}$'",

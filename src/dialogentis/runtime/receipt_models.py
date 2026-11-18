@@ -27,7 +27,7 @@ class RuntimeReceipt(Base):
         ForeignKey("organizations.id", ondelete="CASCADE")
     )
     conversation_id: Mapped[UUID] = mapped_column()
-    created_by: Mapped[UUID] = mapped_column(ForeignKey("users.id"))
+    created_by: Mapped[UUID | None] = mapped_column(ForeignKey("users.id"))
     credential_hash: Mapped[str] = mapped_column(String(64))
     client_message_id: Mapped[UUID] = mapped_column()
     idempotency_key_hash: Mapped[str] = mapped_column(String(64))

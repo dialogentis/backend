@@ -24,6 +24,8 @@ async def run_limited[T](
                     ):
                         break
                 else:
+                    # Release the connection so running turns can commit while this caller waits.
+                    await session.rollback()
                     await asyncio.sleep(0.1)
                     continue
                 break

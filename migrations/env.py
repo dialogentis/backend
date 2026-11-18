@@ -11,6 +11,7 @@ import dialogentis.integrations.models  # noqa: F401 - register integration tabl
 import dialogentis.jobs.models  # noqa: F401 - register job tables
 import dialogentis.organizations  # noqa: F401 - register organization tables
 import dialogentis.runtime.models  # noqa: F401 - register conversation tables
+import dialogentis.runtime.rate_limits  # noqa: F401 - register rate buckets
 import dialogentis.runtime.receipt_models  # noqa: F401 - register receipt tables
 import dialogentis.versions.models  # noqa: F401 - register immutable version tables
 import dialogentis.versions.release_models  # noqa: F401 - register release tables

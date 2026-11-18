@@ -15,8 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from dialogentis.integrations.ledger_models import ActionExecution
 from dialogentis.integrations.models import Integration
-from dialogentis.models import User
-from dialogentis.runtime.conversations import _locked_row
+from dialogentis.runtime.conversations import Principal, _locked_row, created_by
 from dialogentis.runtime.idempotency import ReservedMessage
 from dialogentis.runtime.receipt_models import RuntimeReceipt
 
@@ -49,7 +48,7 @@ class ActionReservation:
 
 async def _active_turn(
     db: AsyncSession,
-    user: User,
+    user: Principal,
     organization_id: UUID,
     conversation_id: UUID,
     credential: str,
@@ -62,7 +61,7 @@ async def _active_turn(
             RuntimeReceipt.organization_id == organization_id,
             RuntimeReceipt.id == reserved.turn_id,
             RuntimeReceipt.conversation_id == conversation_id,
-            RuntimeReceipt.created_by == user.id,
+            RuntimeReceipt.created_by == created_by(user),
         )
         .with_for_update()
     )
@@ -82,7 +81,7 @@ async def _active_turn(
 
 async def begin_action(
     db: AsyncSession,
-    user: User,
+    user: Principal,
     organization_id: UUID,
     conversation_id: UUID,
     credential: str,
@@ -151,7 +150,7 @@ async def begin_action(
 
 async def finish_action(
     db: AsyncSession,
-    user: User,
+    user: Principal,
     organization_id: UUID,
     credential: str,
     turn: ReservedMessage,

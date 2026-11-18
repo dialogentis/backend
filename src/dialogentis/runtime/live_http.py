@@ -11,6 +11,7 @@ from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from dialogentis.channels.api_access import ApiAccess
 from dialogentis.config import Settings
 from dialogentis.db import unit_of_work
 from dialogentis.http_action import HTTP_OUTPUTS, HttpActionConfig, map_http_response
@@ -28,11 +29,21 @@ from dialogentis.slots import Slot
 @dataclass
 class LiveHttpTurn:
     org_id: UUID
-    user_id: UUID
+    user_id: UUID | ApiAccess
     credential: str = field(repr=False)
     reserved: ReservedMessage = field(repr=False)
     deadline: float
     ordinal: int = 0
+
+    async def _principal(self, db: AsyncSession):
+        if isinstance(self.user_id, ApiAccess):
+            await self.user_id.lock_organization(db, self.org_id)
+            return self.user_id
+        user = await db.get(User, self.user_id)
+        if user is None or not user.email_verified:
+            raise HTTPException(403, "Подтвердите адрес почты")
+        await organization_context(db, user, self.org_id, "manage_integrations", lock=True)
+        return user
 
     async def execute(
         self,
@@ -51,11 +62,9 @@ class LiveHttpTurn:
             key: value if isinstance(value, str) else json.dumps(value)
             for key, value in query.items()
         }
-        async with unit_of_work(factory, organization_id=self.org_id, user_id=self.user_id) as db:
-            user = await db.get(User, self.user_id)
-            if user is None or not user.email_verified:
-                raise HTTPException(403, "Подтвердите адрес почты")
-            await organization_context(db, user, self.org_id, "manage_integrations", lock=True)
+        actor = self.user_id if isinstance(self.user_id, UUID) else None
+        async with unit_of_work(factory, organization_id=self.org_id, user_id=actor) as db:
+            user = await self._principal(db)
             item = await db.scalar(
                 select(Integration).where(
                     Integration.organization_id == self.org_id,
@@ -119,10 +128,8 @@ class LiveHttpTurn:
         except IntegrationRequestError as exc:
             outcome = cast(Outcome, exc.code)
 
-        async with unit_of_work(factory, organization_id=self.org_id, user_id=self.user_id) as db:
-            user = await db.get(User, self.user_id)
-            if user is None:
-                raise HTTPException(403, "Недостаточно прав")
+        async with unit_of_work(factory, organization_id=self.org_id, user_id=actor) as db:
+            user = await self._principal(db)
             await finish_action(
                 db, user, self.org_id, self.credential, self.reserved, action, outcome, status
             )

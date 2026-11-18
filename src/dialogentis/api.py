@@ -29,6 +29,7 @@ from dialogentis.flow_routes import router as flow_router
 from dialogentis.integrations.routes import router as integrations_router
 from dialogentis.organizations import router as organizations_router
 from dialogentis.runtime.executor import RuntimeExecutor
+from dialogentis.runtime.public_routes import router as public_runtime_router
 from dialogentis.runtime.routes import router as test_chat_router
 from dialogentis.runtime.test_chat import TestChatService
 from dialogentis.versions.release_routes import router as releases_router
@@ -85,6 +86,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(versions_router)
     app.include_router(releases_router)
     app.include_router(test_chat_router)
+    app.include_router(public_runtime_router)
 
     @app.middleware("http")
     async def request_context(request: Request, call_next: Callable[[Request], Awaitable]):
