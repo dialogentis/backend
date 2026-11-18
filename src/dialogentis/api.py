@@ -17,6 +17,7 @@ from dialogentis.auth.routes import router as auth_router
 from dialogentis.auth.security import COOKIE
 from dialogentis.body_limit import BodyLimitMiddleware
 from dialogentis.channels.api_key_routes import router as api_keys_router
+from dialogentis.channels.widget_routes import router as widget_channels_router
 from dialogentis.config import Settings, get_settings
 from dialogentis.contracts import ErrorResponse
 from dialogentis.datasets.export_routes import router as exports_router
@@ -80,6 +81,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(flow_router)
     app.include_router(integrations_router)
     app.include_router(api_keys_router)
+    app.include_router(widget_channels_router)
     app.include_router(datasets_router)
     app.include_router(exports_router)
     app.include_router(imports_router)
