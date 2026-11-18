@@ -7,7 +7,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from fastapi import HTTPException
-from sqlalchemy import delete, select
+from sqlalchemy import Table, Text, cast, delete, func, select
 
 from dialogentis.api_errors import DomainValidationError
 from dialogentis.db import unit_of_work
@@ -15,10 +15,13 @@ from dialogentis.http_action import HTTP_OUTPUTS
 from dialogentis.integrations.http_client import IntegrationRequestError, IntegrationResponse
 from dialogentis.integrations.ledger_models import ActionExecution
 from dialogentis.jobs.dispatcher import dispatcher_factory
+from dialogentis.jobs.models import OutboxEvent
 from dialogentis.jobs.tasks import process_job
 from dialogentis.jobs.training_tasks import HANDLERS
 from dialogentis.models import AgentDraft, Membership
+from dialogentis.runtime.cleanup import cleanup_expired_conversations
 from dialogentis.runtime.executor import RuntimeExecutor
+from dialogentis.runtime.history_models import ConversationHistory, HistoryTurn
 from dialogentis.runtime.models import TestConversation as ConversationRecord
 from dialogentis.runtime.receipt_models import RuntimeReceipt
 from dialogentis.runtime.test_chat import TestChatService as ChatService
@@ -105,7 +108,7 @@ async def test_handoff_uses_ready_agent_from_same_organization_and_resumes_calle
         assert any(event.event == "returned" for event in result.trace)
 
 
-async def test_mock_and_live_http_actions_use_organization_policy(app, monkeypatch):
+async def test_mock_and_live_http_actions_use_organization_policy(app, monkeypatch, caplog):
     async with client_for(app) as owner, client_for(app) as viewer:
         user_id, org_id, agent_id = await create_agent(app, owner)
         viewer_id, _, _ = await create_agent(app, viewer)
@@ -176,6 +179,8 @@ async def test_mock_and_live_http_actions_use_organization_policy(app, monkeypat
         assert result.status == "waiting_input" and result.messages == ("Статус: готов",)
         assert "готов" not in repr(result.trace) and "private-token" not in repr(result)
         executions = []
+        marker = f"privacy-{uuid4().hex}"
+        timeout_next = False
 
         async def transport(policy, method, path, query, body, **kwargs):
             assert method == "POST" and path == "/orders/123"
@@ -186,6 +191,8 @@ async def test_mock_and_live_http_actions_use_organization_policy(app, monkeypat
             executions.append(kwargs["execution_id"])
             if len(executions) == 2:
                 raise IntegrationRequestError("unknown_result")
+            if timeout_next:
+                raise IntegrationRequestError("timeout") from TimeoutError(marker)
             return IntegrationResponse(200, {"order": {"status": "отправлен"}, "hidden": "данные"})
 
         monkeypatch.setattr("dialogentis.runtime.live_http.request_json", transport)
@@ -232,6 +239,79 @@ async def test_mock_and_live_http_actions_use_organization_policy(app, monkeypat
                 "succeeded",
                 "unknown_result",
             ]
+        settings_url = f"/api/v1/organizations/{org_id}"
+        settings = await owner.get(settings_url)
+        private = await owner.patch(
+            settings_url,
+            json={"store_message_text": False, "purge_existing_text": True},
+            headers={"If-Match": settings.headers["etag"]},
+        )
+        assert private.status_code == 200
+        with caplog.at_level("DEBUG"):
+            timed = await owner.post(
+                start_url, json=body, headers={"Idempotency-Key": "private-timeout"}
+            )
+            idle = await owner.post(
+                start_url, json=body, headers={"Idempotency-Key": "private-expiry"}
+            )
+            assert timed.status_code == idle.status_code == 201
+            timeout_next = True
+            state = timed.json()
+            response = await owner.post(
+                f"{settings_url}/test-conversations/{state['conversation_id']}/messages",
+                json={"client_message_id": str(uuid4()), "revision": 1, "text": marker},
+                headers={
+                    "Idempotency-Key": "private-transport-timeout",
+                    "X-Conversation-Token": state["conversation_token"],
+                },
+            )
+        assert response.status_code == 200 and response.json()["status"] == "completed"
+        assert "timeout" in {event["output"] for event in response.json()["trace"]}
+        assert marker not in response.text and marker not in caplog.text
+        timed_id, idle_id = UUID(state["conversation_id"]), UUID(idle.json()["conversation_id"])
+        async with unit_of_work(app.state.session_factory, organization_id=org_id) as db:
+            idle_row = await db.get(ConversationRecord, idle_id)
+            timed_row = await db.get(ConversationRecord, timed_id)
+            assert timed_row is not None and timed_row.checkpoint is None
+            assert idle_row is not None and idle_row.checkpoint is not None
+            for model, column in (
+                (HistoryTurn, HistoryTurn.encrypted_messages),
+                (RuntimeReceipt, RuntimeReceipt.encrypted_response),
+            ):
+                assert (
+                    await db.scalar(
+                        select(func.count())
+                        .select_from(model)
+                        .where(model.conversation_id.in_((timed_id, idle_id)), column.is_not(None))
+                    )
+                    == 0
+                )
+            for model in (
+                ActionExecution,
+                ConversationRecord,
+                HistoryTurn,
+                RuntimeReceipt,
+                OutboxEvent,
+            ):
+                table = model.__table__
+                assert isinstance(table, Table)
+                content = cast(func.row_to_json(table.table_valued()), Text)
+                assert (
+                    await db.scalar(
+                        select(func.count()).select_from(model).where(content.contains(marker))
+                    )
+                    == 0
+                )
+            idle_row.idle_expires_at = datetime.now(UTC) - timedelta(seconds=1)
+            await db.flush()
+            assert await cleanup_expired_conversations(db, org_id) == 1
+        async with unit_of_work(app.state.session_factory, organization_id=org_id) as db:
+            assert await db.get(ConversationRecord, idle_id) is None
+            history = await db.get(ConversationHistory, (org_id, idle_id))
+            assert history is not None and history.status == "expired"
+        for path in (app.state.settings.artifact_root / str(org_id)).iterdir():
+            if path.is_file():
+                assert marker.encode() not in path.read_bytes()
         disabled = await owner.patch(
             f"{integrations}/{created.json()['id']}",
             json={"enabled": False},
