@@ -1,4 +1,4 @@
-from datetime import UTC, datetime, timedelta
+from datetime import datetime
 from typing import Annotated, Literal
 from uuid import UUID
 
@@ -13,12 +13,20 @@ from dialogentis.models import Organization
 from dialogentis.organizations import organization_context
 from dialogentis.runtime.executor import EventView
 from dialogentis.runtime.history import read_messages
+from dialogentis.runtime.history_filters import (
+    ChannelType,
+    HistoryFilters,
+    HistoryStatus,
+    filtered_history,
+    history_cutoff,
+    history_query,
+)
 from dialogentis.runtime.history_models import ConversationHistory, HistoryTurn
+from dialogentis.runtime.history_search import HistorySearchInput, search_history
+from dialogentis.runtime.rate_limits import take_slot
 from dialogentis.runtime.receipts import ReceiptError
 
 router = APIRouter(prefix="/api/v1/organizations/{org_id}/conversations", tags=["history"])
-type ChannelType = Literal["test", "api", "widget"]
-type HistoryStatus = Literal["waiting_input", "completed", "failed", "expired"]
 PageSize = Annotated[int, Query(ge=1, le=100)]
 TurnCursor = Annotated[int | None, Query(ge=0)]
 
@@ -66,14 +74,6 @@ async def organization(db: Database, user: VerifiedUser, org_id: UUID) -> Organi
     return organization
 
 
-def history_query(org: Organization):
-    return select(ConversationHistory).where(
-        ConversationHistory.organization_id == org.id,
-        ConversationHistory.last_activity_at
-        > datetime.now(UTC) - timedelta(days=org.retention_days),
-    )
-
-
 async def conversation(
     db: Database, org: Organization, conversation_id: UUID
 ) -> ConversationHistory:
@@ -101,29 +101,18 @@ async def list_history(
     org = await organization(db, user, org_id)
     if start_at is not None and end_at is not None and start_at >= end_at:
         raise HTTPException(422, "Дата начала должна предшествовать окончанию периода")
-    query = history_query(org)
-    for column, value in (
-        (ConversationHistory.agent_id, agent_id),
-        (ConversationHistory.channel_type, channel_type),
-        (ConversationHistory.status, status),
-    ):
-        if value is not None:
-            query = query.where(column == value)
-    if start_at is not None:
-        query = query.where(ConversationHistory.created_at >= start_at)
-    if end_at is not None:
-        query = query.where(ConversationHistory.created_at < end_at)
-    if intent_id is not None or error_code is not None:
-        turn = select(HistoryTurn.turn_id).where(
-            HistoryTurn.organization_id == org.id,
-            HistoryTurn.conversation_id == ConversationHistory.id,
-            HistoryTurn.created_at > datetime.now(UTC) - timedelta(days=org.retention_days),
-        )
-        if intent_id is not None:
-            turn = turn.where(HistoryTurn.intent_id == intent_id)
-        if error_code is not None:
-            turn = turn.where(HistoryTurn.error_code == error_code)
-        query = query.where(turn.exists())
+    filters = HistoryFilters.model_validate(
+        {
+            "agent_id": agent_id,
+            "channel_type": channel_type,
+            "status": status,
+            "from": start_at,
+            "to": end_at,
+            "intent_id": intent_id,
+            "error_code": error_code,
+        }
+    )
+    query = filtered_history(org, filters)
     if cursor is not None:
         before = await conversation(db, org, cursor)
         query = query.where(
@@ -140,6 +129,23 @@ async def list_history(
     return CursorPage[ConversationView](
         items=[ConversationView.model_validate(row, from_attributes=True) for row in rows[:limit]],
         next_cursor=str(rows[limit - 1].id) if len(rows) > limit else None,
+    )
+
+
+@router.post("/search", response_model=CursorPage[ConversationView])
+async def find_history(
+    org_id: UUID, body: HistorySearchInput, request: Request, user: VerifiedUser, db: Database
+):
+    org = await organization(db, user, org_id)
+    start, end = body.filters.start_at, body.filters.end_at
+    if start is not None and end is not None and start >= end:
+        raise HTTPException(422, "Дата начала должна предшествовать окончанию периода")
+    await take_slot(db, org.id, "history-search:organization", 0.25, 8)
+    await take_slot(db, org.id, f"history-search:{user.id}", 0.5, 5)
+    rows, next_cursor = await search_history(db, org, request.app.state.settings, body)
+    return CursorPage[ConversationView](
+        items=[ConversationView.model_validate(row, from_attributes=True) for row in rows],
+        next_cursor=next_cursor,
     )
 
 
@@ -166,7 +172,7 @@ async def turn_page(
     query = select(HistoryTurn).where(
         HistoryTurn.organization_id == org.id,
         HistoryTurn.conversation_id == conversation_id,
-        HistoryTurn.created_at > datetime.now(UTC) - timedelta(days=org.retention_days),
+        HistoryTurn.created_at > history_cutoff(org),
     )
     if cursor is not None:
         query = query.where(HistoryTurn.sequence > cursor)
