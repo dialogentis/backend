@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from dialogentis.auth.security import digest
 from dialogentis.channels.api_access import ApiAccess
+from dialogentis.channels.widget_access import WidgetAccess
 from dialogentis.config import Settings
 from dialogentis.jobs.models import Job
 from dialogentis.models import User
@@ -30,7 +31,8 @@ from dialogentis.runtime.models import TestConversation
 from dialogentis.versions.models import AgentVersion
 from dialogentis.versions.prepare import version_status
 
-type Principal = User | ApiAccess
+PublicAccess = ApiAccess | WidgetAccess
+type Principal = User | PublicAccess
 
 
 def created_by(principal: Principal) -> UUID | None:
@@ -46,7 +48,7 @@ class ConversationSnapshot:
 
 
 async def _access(db: AsyncSession, user: Principal, organization_id: UUID) -> None:
-    if isinstance(user, ApiAccess):
+    if isinstance(user, PublicAccess):
         await user.lock_organization(db, organization_id)
         return
     if not user.email_verified:
@@ -90,7 +92,7 @@ async def create_conversation(
     release_id: UUID | None = None,
 ) -> ConversationSnapshot:
     await _access(db, user, organization_id)
-    if isinstance(user, ApiAccess) and (agent_id != user.agent_id or release_id is None):
+    if isinstance(user, PublicAccess) and (agent_id != user.agent_id or release_id is None):
         raise HTTPException(404, "Агент недоступен")
     version_and_job = (
         await db.execute(
@@ -124,6 +126,7 @@ async def create_conversation(
         version_id=version_id,
         created_by=created_by(user),
         api_key_id=user.id if isinstance(user, ApiAccess) else None,
+        widget_id=user.id if isinstance(user, WidgetAccess) else None,
         release_id=release_id,
         credential_hash=digest(credential),
         http_mode=http_mode,
@@ -159,6 +162,7 @@ async def _locked_row(
             TestConversation.id == conversation_id,
             TestConversation.created_by == created_by(user),
             TestConversation.api_key_id == (user.id if isinstance(user, ApiAccess) else None),
+            TestConversation.widget_id == (user.id if isinstance(user, WidgetAccess) else None),
         )
         .with_for_update()
         .execution_options(populate_existing=True)
@@ -198,7 +202,7 @@ async def reserve_turn(
 ) -> TurnReservation:
     if not (
         (type(expected_revision) is int and expected_revision >= 1)
-        or (expected_revision is None and isinstance(user, ApiAccess))
+        or (expected_revision is None and isinstance(user, PublicAccess))
     ):
         raise ValueError("Invalid revision")
     row, now = await _locked_row(db, user, organization_id, conversation_id, credential)

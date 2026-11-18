@@ -13,7 +13,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from dialogentis.artifact_service import read_artifact
 from dialogentis.artifacts import ArtifactStorage
+from dialogentis.auth.security import digest
 from dialogentis.channels.api_access import ApiAccess
+from dialogentis.channels.widget_access import WidgetAccess
 from dialogentis.config import Settings
 from dialogentis.datasets.validation import Issue
 from dialogentis.db import unit_of_work
@@ -23,7 +25,7 @@ from dialogentis.integrations.models import Integration
 from dialogentis.jobs.models import Job
 from dialogentis.models import Agent, User
 from dialogentis.nlu.model_store import ModelIdentity
-from dialogentis.runtime.conversations import Principal, _access
+from dialogentis.runtime.conversations import Principal, PublicAccess, _access
 from dialogentis.runtime.core import Prediction, RuntimeEngine, RuntimeResult, TraceEvent
 from dialogentis.runtime.executor import ExecutionError, HttpHandler, RuntimeExecutor, RuntimeTarget
 from dialogentis.runtime.idempotency import (
@@ -37,7 +39,7 @@ from dialogentis.runtime.idempotency import (
 from dialogentis.runtime.limits import run_limited
 from dialogentis.runtime.live_http import LiveHttpTurn
 from dialogentis.runtime.models import TestConversation
-from dialogentis.runtime.rate_limits import limit_api_turn
+from dialogentis.runtime.rate_limits import limit_api_turn, limit_widget_turn
 from dialogentis.runtime.receipts import start_identity
 from dialogentis.slots import validate_slots
 from dialogentis.versions.models import AgentVersion
@@ -45,7 +47,7 @@ from dialogentis.versions.prepare import version_status
 from dialogentis.versions.release_check import ReleasePin
 from dialogentis.versions.release_models import Release
 
-type Actor = UUID | ApiAccess
+type Actor = UUID | PublicAccess
 type Manifest = dict[tuple[UUID, UUID], ReleasePin]
 
 
@@ -104,7 +106,7 @@ class TestChatService:
             await asyncio.gather(*pending, return_exceptions=True)
 
     async def _user(self, db: AsyncSession, user_id: Actor) -> Principal:
-        if isinstance(user_id, ApiAccess):
+        if isinstance(user_id, PublicAccess):
             return user_id
         user = await db.get(User, user_id)
         if user is None or not user.email_verified:
@@ -323,7 +325,9 @@ class TestChatService:
             self._start(user_id, org_id, agent_id, version_id, idempotency_key, http_mode)
         )
 
-    async def start_public(self, access: ApiAccess, idempotency_key: str) -> ChatResponse:
+    async def start_public(self, access: PublicAccess, idempotency_key: str) -> ChatResponse:
+        if isinstance(access, WidgetAccess):
+            idempotency_key = digest(f"{access.origin}:{idempotency_key}")
         return await self._run_detached(
             self._start(
                 access, access.organization_id, access.agent_id, None, idempotency_key, "live"
@@ -350,7 +354,7 @@ class TestChatService:
                 release_id = None
                 manifest = None
                 existing = None
-                if isinstance(user, ApiAccess):
+                if isinstance(user, PublicAccess):
                     await user.authorize(db)
                     assert idempotency_key is not None
                     conversation_id, _, _ = start_identity(
@@ -362,10 +366,12 @@ class TestChatService:
                 agent = await db.get(Agent, agent_id)
                 if agent is None or (agent.status != "active" and existing is None):
                     raise HTTPException(409, "Архивный агент недоступен для нового диалога")
-                if isinstance(user, ApiAccess):
+                if isinstance(user, PublicAccess):
                     release_id = existing.release_id if existing else agent.current_release_id
                     release, manifest = await load_release(db, org_id, agent_id, release_id)
                     selected = release.root_version_id
+                if isinstance(user, WidgetAccess) and existing is None:
+                    await limit_widget_turn(db, user, start=True)
                 assert selected is not None
                 bundle = await self._bundle(db, user, org_id, agent_id, selected, manifest)
                 initial = await asyncio.to_thread(
@@ -497,7 +503,7 @@ class TestChatService:
                     self.factory, organization_id=org_id, user_id=session_user(user_id)
                 ) as db:
                     user = await self._user(db, user_id)
-                    if isinstance(user, ApiAccess):
+                    if isinstance(user, PublicAccess):
                         await user.authorize(db)
                     reserved = await reserve_message(
                         db,
@@ -513,6 +519,8 @@ class TestChatService:
                     )
                     if isinstance(user, ApiAccess) and not isinstance(reserved, Replay):
                         await limit_api_turn(db, org_id, user.id, start=False)
+                    if isinstance(user, WidgetAccess) and not isinstance(reserved, Replay):
+                        await limit_widget_turn(db, user, start=False)
                 if isinstance(reserved, Replay):
                     return ChatResponse(
                         conversation_id,

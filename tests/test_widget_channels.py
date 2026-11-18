@@ -1,11 +1,21 @@
 import os
-from uuid import UUID
+import time
+from uuid import UUID, uuid4
 
 import pytest
+from cryptography.fernet import Fernet
+from fastapi import HTTPException
 from sqlalchemy import select
 
+from dialogentis.channels.widget_access import (
+    WIDGET_TOKEN_TTL,
+    WidgetGrant,
+    issue_widget_token,
+    read_widget_token,
+)
 from dialogentis.channels.widget_models import WidgetChannel
 from dialogentis.channels.widget_origins import widget_origin
+from dialogentis.config import Settings
 from dialogentis.db import unit_of_work
 from dialogentis.deletion_worker import purge_tenant
 from dialogentis.models import Membership
@@ -13,6 +23,30 @@ from dialogentis.organizations import AuditEvent
 from tests.test_auth import client_for
 from tests.test_exports import app as app
 from tests.test_versions import create_agent
+
+
+def test_widget_token_expires_and_cannot_move_to_another_conversation(monkeypatch):
+    settings = Settings(app_env="test", encryption_key=Fernet.generate_key().decode("ascii"))
+    claim = WidgetGrant(
+        channel_id=uuid4(),
+        organization_id=uuid4(),
+        agent_id=uuid4(),
+        conversation_id=uuid4(),
+        origin="https://shop.example",
+        credential="a" * 43,
+    )
+    token = issue_widget_token(settings, claim)
+    assert read_widget_token(settings, token, claim.conversation_id) == claim
+    with pytest.raises(HTTPException) as invalid:
+        read_widget_token(settings, token, uuid4())
+    assert invalid.value.status_code == 401
+    old = time.time() - WIDGET_TOKEN_TTL - 5
+    with monkeypatch.context() as patch:
+        patch.setattr("cryptography.fernet.time.time", lambda: old)
+        expired = issue_widget_token(settings, claim)
+    with pytest.raises(HTTPException) as expired_error:
+        read_widget_token(settings, expired, claim.conversation_id)
+    assert expired_error.value.status_code == 401
 
 
 def test_widget_origins_use_exact_authorities_and_development_loopback():
@@ -87,6 +121,40 @@ async def test_widget_settings_permissions_concurrency_and_deletion(app):
         assert widget["position"] == "bottom-right" and widget["enabled"]
         assert (await owner.get(path)).json()["items"] == [widget]
         assert (await owner.get(item)).headers["etag"] == '"rev-1"'
+        embed = await owner.get(f"{item}/embed-code")
+        assert embed.status_code == 200
+        assert embed.json()["html"] == (
+            f'<script async src="http://test/widget-loader.js" '
+            f'data-dialogentis-widget="{widget_id}"></script>'
+        )
+        public = f"/api/v1/widget/channels/{widget_id}"
+        frame = await anonymous.get(f"{public}/frame")
+        assert frame.status_code == 200
+        assert frame.headers["content-security-policy"].endswith(
+            "frame-ancestors https://shop.example"
+        )
+        assert "Добрый день" in frame.text
+        assert (
+            await anonymous.post(
+                f"{public}/sessions",
+                headers={"Idempotency-Key": "start", "Origin": "https://shop.example"},
+                json={"parent_origin": "https://shop.example"},
+            )
+        ).status_code == 403
+        assert (
+            await anonymous.post(
+                f"{public}/sessions",
+                headers={"Idempotency-Key": "start"},
+                json={"parent_origin": "https://sub.shop.example"},
+            )
+        ).status_code == 403
+        assert (
+            await anonymous.post(
+                f"{public}/sessions",
+                headers={"Idempotency-Key": "start"},
+                json={"parent_origin": "https://shop.example"},
+            )
+        ).status_code == 409
         wrong = (
             f"/api/v1/organizations/{other_org}/agents/{other_agent}/widget-channels/{widget_id}"
         )

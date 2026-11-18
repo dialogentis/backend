@@ -27,6 +27,7 @@ class TestConversation(Base):
     version_id: Mapped[UUID] = mapped_column()
     created_by: Mapped[UUID | None] = mapped_column(ForeignKey("users.id"))
     api_key_id: Mapped[UUID | None] = mapped_column()
+    widget_id: Mapped[UUID | None] = mapped_column()
     release_id: Mapped[UUID | None] = mapped_column()
     checkpoint: Mapped[bytes | None] = mapped_column(LargeBinary)
     http_mode: Mapped[str] = mapped_column(String(4), default="mock", server_default="mock")
@@ -39,6 +40,11 @@ class TestConversation(Base):
     absolute_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
     __table_args__ = (
+        ForeignKeyConstraint(
+            ["organization_id", "agent_id", "widget_id"],
+            ["widget_channels.organization_id", "widget_channels.agent_id", "widget_channels.id"],
+            name="fk_conversations_widget_id",
+        ),
         ForeignKeyConstraint(
             ["organization_id", "agent_id", "api_key_id"],
             ["agent_api_keys.organization_id", "agent_api_keys.agent_id", "agent_api_keys.id"],
@@ -56,9 +62,10 @@ class TestConversation(Base):
         ),
         CheckConstraint("revision > 0"),
         CheckConstraint(
-            "(created_by IS NOT NULL AND api_key_id IS NULL AND release_id IS NULL) OR "
-            "(created_by IS NULL AND api_key_id IS NOT NULL AND release_id IS NOT NULL "
-            "AND http_mode = 'live')",
+            "(created_by IS NOT NULL AND api_key_id IS NULL AND widget_id IS NULL "
+            "AND release_id IS NULL) OR "
+            "(created_by IS NULL AND num_nonnulls(api_key_id, widget_id) = 1 "
+            "AND release_id IS NOT NULL AND http_mode = 'live')",
             name="ck_conversations_principal",
         ),
         CheckConstraint("http_mode IN ('mock', 'live')", name="ck_test_conversations_http_mode"),

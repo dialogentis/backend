@@ -1,4 +1,5 @@
 from datetime import UTC, datetime
+from html import escape
 from typing import Annotated
 from uuid import UUID
 
@@ -68,6 +69,10 @@ class WidgetView(BaseModel):
     revision: int
     created_at: datetime
     updated_at: datetime
+
+
+class WidgetEmbed(BaseModel):
+    html: str
 
 
 def widget_query(org_id: UUID, agent_id: UUID):
@@ -233,3 +238,21 @@ async def disable_widget(
         widget.updated_at = datetime.now(UTC)
         widget.updated_by = user.id
         audit(db, org_id, user, "widget.disabled", widget.id)
+
+
+@router.get("/{channel_id}/embed-code", response_model=WidgetEmbed)
+async def embed_code(
+    org_id: UUID,
+    agent_id: UUID,
+    channel_id: UUID,
+    request: Request,
+    user: VerifiedUser,
+    db: Database,
+) -> WidgetEmbed:
+    await organization_context(db, user, org_id, "manage_channels")
+    widget = await find_widget(db, org_id, agent_id, channel_id)
+    base = escape(request.app.state.settings.public_base_url.rstrip("/"), quote=True)
+    return WidgetEmbed(
+        html=f'<script async src="{base}/widget-loader.js" '
+        f'data-dialogentis-widget="{widget.id}"></script>'
+    )

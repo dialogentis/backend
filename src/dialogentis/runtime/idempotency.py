@@ -10,6 +10,7 @@ from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from dialogentis.channels.api_access import ApiAccess
+from dialogentis.channels.widget_access import WidgetAccess
 from dialogentis.config import Settings
 from dialogentis.integrations.ledger_models import ActionExecution
 from dialogentis.models import Organization, User
@@ -117,6 +118,7 @@ async def reserve_initial_turn(
             row.agent_id != agent_id
             or row.created_by != created_by(user)
             or row.api_key_id != (user.id if isinstance(user, ApiAccess) else None)
+            or row.widget_id != (user.id if isinstance(user, WidgetAccess) else None)
             or row.release_id != release_id
             or row.version_id != version_id
             or row.http_mode != http_mode

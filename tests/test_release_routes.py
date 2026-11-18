@@ -143,6 +143,39 @@ async def test_release_gates_atomic_publication_pins_and_rollback(app):
             str(target_version),
         }
         assert (await owner.post(f"{target_url}/archive")).status_code == 409
+        widget_path = f"{root_url}/widget-channels"
+        widget = await owner.post(
+            widget_path,
+            json={
+                "name": "Поддержка",
+                "allowed_origins": ["https://shop.example"],
+            },
+        )
+        assert widget.status_code == 201
+        widget_id = widget.json()["id"]
+        widget_start = f"/api/v1/widget/channels/{widget_id}/sessions"
+        widget_body = {"parent_origin": "https://shop.example"}
+        boot_headers = {"Idempotency-Key": "start-widget"}
+        boot = await public.post(widget_start, json=widget_body, headers=boot_headers)
+        assert boot.status_code == 201, boot.status_code
+        widget_chat = boot.json()
+        assert widget_chat["messages"][0]["text"] == "Где заказ 321?"
+        assert "conversation_token" not in widget_chat
+        assert widget_chat["session_token"].startswith("dgw_")
+        replay_boot = await public.post(widget_start, json=widget_body, headers=boot_headers)
+        assert replay_boot.json()["conversation_id"] == widget_chat["conversation_id"]
+        async with unit_of_work(app.state.session_factory, organization_id=org_id) as db:
+            bucket = await db.get(RateBucket, (org_id, f"widget:start:{widget_id}"))
+            assert bucket is not None
+            bucket.available_at = datetime.now(UTC) + timedelta(minutes=2)
+        limited_widget = await public.post(
+            widget_start, json=widget_body, headers={"Idempotency-Key": "new-session"}
+        )
+        assert limited_widget.status_code == 429
+        assert limited_widget.headers["retry-after"] == "3"
+        assert (await public.post(widget_start, json=widget_body, headers=boot_headers)).json()[
+            "replayed"
+        ]
         issued = await owner.post(f"{root_url}/api-keys", json={"name": "Client"})
         issued_other = await owner.post(f"{root_url}/api-keys", json={"name": "Other client"})
         assert issued.status_code == issued_other.status_code == 201
@@ -187,6 +220,33 @@ async def test_release_gates_atomic_publication_pins_and_rollback(app):
         assert second.status_code == 201, second.text
         assert (await owner.post(f"{target_url}/archive")).status_code == 200
         assert (await say(old_chat, "Сегодня"))["messages"] == ["Доставка: Сегодня / важно"]
+        widget_message = f"/api/v1/widget/conversations/{widget_chat['conversation_id']}/messages"
+        widget_payload = {"client_message_id": str(uuid4()), "text": "Сегодня"}
+        widget_headers = {
+            "Authorization": f"Bearer {widget_chat['session_token']}",
+            "Idempotency-Key": "widget-message",
+        }
+        crossed = f"/api/v1/widget/conversations/{uuid4()}/messages"
+        assert (
+            await public.post(crossed, headers=widget_headers, json=widget_payload)
+        ).status_code == 401
+        assert (
+            await public.post(
+                widget_message, headers={**widget_headers, **auth}, json=widget_payload
+            )
+        ).status_code == 401
+        widget_answer = await public.post(
+            widget_message, headers=widget_headers, json=widget_payload
+        )
+        assert widget_answer.status_code == 200, widget_answer.text
+        assert widget_answer.json()["messages"][0]["text"] == "Доставка: Сегодня / важно"
+        assert (await owner.post(f"{widget_path}/{widget_id}/disable")).status_code == 204
+        assert (
+            await public.post(widget_message, headers=widget_headers, json=widget_payload)
+        ).status_code == 404
+        assert (
+            await public.post(widget_start, json=widget_body, headers=boot_headers)
+        ).status_code == 403
         replacement = await start_public("replacement")
         assert replacement.status_code == 201, replacement.text
         assert replacement.json()["release_id"] == second.json()["id"]

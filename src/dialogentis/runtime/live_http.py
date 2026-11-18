@@ -11,7 +11,6 @@ from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from dialogentis.channels.api_access import ApiAccess
 from dialogentis.config import Settings
 from dialogentis.db import unit_of_work
 from dialogentis.http_action import HTTP_OUTPUTS, HttpActionConfig, map_http_response
@@ -22,6 +21,7 @@ from dialogentis.integrations.schema import IntegrationInput, path_allowed
 from dialogentis.integrations.secrets import IntegrationSecretError, open_secret
 from dialogentis.models import User
 from dialogentis.organizations import organization_context
+from dialogentis.runtime.conversations import PublicAccess
 from dialogentis.runtime.idempotency import ReservedMessage
 from dialogentis.slots import Slot
 
@@ -29,14 +29,14 @@ from dialogentis.slots import Slot
 @dataclass
 class LiveHttpTurn:
     org_id: UUID
-    user_id: UUID | ApiAccess
+    user_id: UUID | PublicAccess
     credential: str = field(repr=False)
     reserved: ReservedMessage = field(repr=False)
     deadline: float
     ordinal: int = 0
 
     async def _principal(self, db: AsyncSession):
-        if isinstance(self.user_id, ApiAccess):
+        if isinstance(self.user_id, PublicAccess):
             await self.user_id.lock_organization(db, self.org_id)
             return self.user_id
         user = await db.get(User, self.user_id)
