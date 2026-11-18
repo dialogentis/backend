@@ -78,6 +78,21 @@ def test_call_persists_frames_and_returns_only_explicit_parameters():
     assert any(event.event == "returned" for event in result.trace)
 
 
+def test_history_masks_sensitive_values_through_a_handoff_and_keeps_version_trace():
+    root, target, root_version, target_version, _, _ = call_flows()
+    for slot in (*root["slots"][:2], *target["slots"][:2]):
+        slot["sensitive"] = True
+    engine = engines(root, target, root_version, target_version)
+    greeting = engine.start()
+    assert greeting.messages == ("Где заказ 321?",)
+    assert greeting.history_messages == ("Где заказ [скрыто]?",)
+    sent = engine.send(greeting.state, "Завтра")
+    assert sent.messages == ("Доставка: Завтра / важно",)
+    assert sent.history_input == "[скрыто]"
+    assert sent.history_messages == ("Доставка: [скрыто] / важно",)
+    assert {event.version_id for event in sent.trace} == {root_version, target_version}
+
+
 def test_transfer_drops_caller_and_root_return_completes_the_session():
     root, target, root_version, target_version, call, _ = call_flows()
     call["config"].update(mode="transfer", return_mapping={})

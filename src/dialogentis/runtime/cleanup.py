@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from dialogentis.integrations.ledger_models import ActionExecution
 from dialogentis.models import Organization
+from dialogentis.runtime.history_models import ConversationHistory
 from dialogentis.runtime.models import TestConversation
 from dialogentis.runtime.receipt_models import RuntimeReceipt
 
@@ -52,6 +53,15 @@ async def cleanup_expired_conversations(db: AsyncSession, organization_id: UUID)
             )
         )
     ).all()
+    await db.execute(
+        update(ConversationHistory)
+        .where(
+            ConversationHistory.organization_id == organization_id,
+            ConversationHistory.id.in_(ids),
+            ConversationHistory.status == "waiting_input",
+        )
+        .values(status="expired")
+    )
     for conversation_id, expired_at in expiry_rows:
         await db.execute(
             update(RuntimeReceipt)
@@ -91,6 +101,15 @@ async def recover_abandoned_turns(db: AsyncSession, organization_id: UUID) -> in
     ).all()
     if not ids:
         return 0
+    await db.execute(
+        update(ConversationHistory)
+        .where(
+            ConversationHistory.organization_id == organization_id,
+            ConversationHistory.id.in_(ids),
+            ConversationHistory.status == "waiting_input",
+        )
+        .values(status="failed")
+    )
     for conversation_id, token in (
         await db.execute(
             select(TestConversation.id, TestConversation.processing_token).where(

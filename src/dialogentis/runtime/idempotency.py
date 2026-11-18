@@ -29,11 +29,11 @@ from dialogentis.runtime.conversations import (
     reserve_turn,
 )
 from dialogentis.runtime.core import RuntimeResult, RuntimeState, TraceEvent
+from dialogentis.runtime.history import record_history
 from dialogentis.runtime.models import TestConversation
 from dialogentis.runtime.receipt_models import RuntimeReceipt
 from dialogentis.runtime.receipts import (
     ReceiptIdentity,
-    ReceiptPayload,
     open_receipt,
     request_fingerprint,
     seal_receipt,
@@ -240,10 +240,8 @@ async def complete_initial_turn(
     row.idle_expires_at = min(now + timedelta(minutes=30), row.absolute_expires_at)
     org = await db.get(Organization, organization_id)
     assert org is not None
+    payload = await record_history(db, org, row, receipt.id, now, result, settings)
     if org.store_message_text:
-        payload = ReceiptPayload.from_result(
-            row.revision, result.state.status, result.messages, result.trace, result.error_code
-        )
         receipt.encrypted_response = seal_receipt(
             payload, ReceiptIdentity(organization_id, row.id, receipt.id), settings
         )
@@ -417,10 +415,8 @@ async def complete_message(
     )
     org = await db.get(Organization, organization_id)
     assert org is not None
+    payload = await record_history(db, org, row, item.id, now, result, settings)
     if org.store_message_text:
-        payload = ReceiptPayload.from_result(
-            saved.revision, result.state.status, result.messages, result.trace, result.error_code
-        )
         item.encrypted_response = seal_receipt(
             payload, ReceiptIdentity(organization_id, conversation_id, item.id), settings
         )

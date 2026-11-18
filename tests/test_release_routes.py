@@ -4,7 +4,7 @@ from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.exc import DBAPIError
 
 from dialogentis.db import unit_of_work
@@ -13,7 +13,9 @@ from dialogentis.jobs.tasks import process_job
 from dialogentis.jobs.training_tasks import HANDLERS
 from dialogentis.models import AgentDraft, Membership, Organization
 from dialogentis.organizations import AuditEvent
+from dialogentis.runtime.history_models import ConversationHistory, HistoryTurn
 from dialogentis.runtime.rate_limits import RateBucket
+from dialogentis.runtime.receipt_models import RuntimeReceipt
 from dialogentis.versions.release_models import Release, ReleaseVersion
 from tests.test_auth import client_for
 from tests.test_exports import app as app
@@ -41,6 +43,7 @@ async def test_release_gates_atomic_publication_pins_and_rollback(app):
             db.add(Membership(organization_id=org_id, user_id=editor_id, role="editor"))
 
         root, target, _, _, handoff, _ = call_flows()
+        root["slots"][2]["sensitive"] = True
 
         async def train(agent_id, flow_config, revision, *, minimum=True):
             data = training_dataset().model_dump(mode="json")
@@ -279,7 +282,10 @@ async def test_release_gates_atomic_publication_pins_and_rollback(app):
         assert result["sequence"] == 1 and "trace" not in result
         assert [item["text"] for item in result["messages"]] == ["Доставка: Сегодня / важно"]
         repeat = await public.post(f"{conversation_path}/messages", json=message, headers=headers)
-        assert repeat.json()["replayed"] and repeat.json()["messages"] == result["messages"]
+        assert repeat.json()["replayed"]
+        assert repeat.json()["messages"] == [
+            {**result["messages"][0], "text": "Доставка: Сегодня / [скрыто]"}
+        ]
         assert (
             await public.post(
                 f"{conversation_path}/messages", json={**message, "text": "Завтра"}, headers=headers
@@ -304,6 +310,42 @@ async def test_release_gates_atomic_publication_pins_and_rollback(app):
             f"{root_url}/rollback", json=undo, headers={"If-Match": second.headers["etag"]}
         )
         assert rolled.status_code == 200 and rolled.json()["current_release_id"] == release_a["id"]
+        history_path = f"/api/v1/organizations/{org_id}/conversations"
+        query = {"agent_id": str(root_id), "channel_type": "widget", "status": "completed"}
+        stored = await editor.get(history_path, params=query)
+        assert stored.status_code == 200
+        assert [row["id"] for row in stored.json()["items"]] == [widget_chat["conversation_id"]]
+        widget_history = f"{history_path}/{widget_chat['conversation_id']}"
+        assert (await owner.get(widget_history)).json()["release_id"] == release_a["id"]
+        assert (await public.get(widget_history, headers=widget_headers)).status_code == 401
+        page = (await owner.get(f"{widget_history}/messages", params={"limit": 1})).json()
+        assert page["next_cursor"] == "0"
+        after = (
+            await owner.get(f"{widget_history}/messages", params={"cursor": page["next_cursor"]})
+        ).json()
+        assert after["items"][0]["messages"] == [
+            {"role": "user", "text": "Сегодня"},
+            {"role": "agent", "text": "Доставка: Сегодня / [скрыто]"},
+        ]
+        trace = (await owner.get(f"{widget_history}/trace")).json()["items"]
+        assert {event["version_id"] for item in trace for event in item["trace"]} == {
+            str(first_version),
+            str(target_version),
+        }
+        async with unit_of_work(app.state.session_factory, organization_id=other_org) as db:
+            assert (
+                await db.get(ConversationHistory, (org_id, UUID(widget_chat["conversation_id"])))
+                is None
+            )
+        async with unit_of_work(app.state.session_factory, organization_id=org_id) as db:
+            await db.execute(
+                delete(RuntimeReceipt).where(
+                    RuntimeReceipt.conversation_id == UUID(widget_chat["conversation_id"])
+                )
+            )
+        assert (await owner.get(f"{widget_history}/messages")).json()["items"][-1][
+            "messages"
+        ] == after["items"][0]["messages"]
         async with unit_of_work(app.state.session_factory, organization_id=org_id) as db:
             org = await db.get(Organization, org_id)
             assert org is not None
@@ -324,6 +366,24 @@ async def test_release_gates_atomic_publication_pins_and_rollback(app):
         ).json()
         assert privacy_replay["replayed"] and not privacy_replay["replay_available"]
         assert privacy_replay["messages"] == []
+        private_history = f"{history_path}/{private['conversation_id']}"
+        assert (await owner.get(private_history)).json()["store_message_text"] is False
+        assert (await owner.get(f"{private_history}/messages")).json()["items"] == []
+        assert (await owner.get(f"{private_history}/trace")).json()["items"]
+        org_path = f"/api/v1/organizations/{org_id}"
+        etag = (await owner.get(org_path)).headers["etag"]
+        assert (
+            await owner.patch(
+                org_path, json={"purge_existing_text": True}, headers={"If-Match": etag}
+            )
+        ).status_code == 200
+        async with unit_of_work(app.state.session_factory, organization_id=org_id) as db:
+            assert (
+                await db.scalar(
+                    select(HistoryTurn).where(HistoryTurn.encrypted_messages.is_not(None))
+                )
+                is None
+            )
         async with unit_of_work(app.state.session_factory, organization_id=org_id) as db:
             bucket = await db.get(RateBucket, (org_id, f"start:key:{issued.json()['id']}"))
             assert bucket is not None

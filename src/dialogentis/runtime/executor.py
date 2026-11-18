@@ -94,6 +94,7 @@ class EventView(BaseModel):
     event: str = Field(max_length=64)
     output: str | None = Field(default=None, max_length=128)
     fallback_reasons: tuple[str, ...] = Field(default=(), max_length=10)
+    version_id: UUID | None = None
 
 
 class ResultView(BaseModel):
@@ -102,6 +103,8 @@ class ResultView(BaseModel):
     messages: tuple[str, ...] = Field(max_length=52)
     trace: tuple[EventView, ...] = Field(max_length=120)
     error_code: str | None = Field(default=None, max_length=64)
+    history_input: str | None = Field(default=None, max_length=4000, repr=False)
+    history_messages: tuple[str, ...] | None = Field(default=None, max_length=52, repr=False)
 
 
 class RuntimeExecutor:
@@ -358,6 +361,8 @@ class RuntimeExecutor:
                 view.messages,
                 tuple(TraceEvent(**event.model_dump()) for event in view.trace),
                 view.error_code,
+                view.history_input,
+                view.history_messages,
             )
         except ExecutionError:
             raise

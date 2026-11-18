@@ -18,11 +18,14 @@ from dialogentis.jobs.broker import create_broker
 from dialogentis.jobs.dispatcher import dispatcher_factory
 from dialogentis.jobs.lifecycle import recover_tenant
 from dialogentis.jobs.models import MaintenanceRun, OutboxEvent
+from dialogentis.models import Organization
 from dialogentis.runtime.cleanup import (
     cleanup_expired_conversations,
     cleanup_expired_receipts,
     recover_abandoned_turns,
 )
+from dialogentis.runtime.history import cleanup_history
+from dialogentis.runtime.history_models import ConversationHistory
 from dialogentis.runtime.models import TestConversation
 from dialogentis.runtime.receipt_models import RuntimeReceipt
 
@@ -46,6 +49,9 @@ async def reconcile_once(
             ).all()
             conversation_organizations = (
                 await db.scalars(select(TestConversation.organization_id).distinct())
+            ).all()
+            history_organizations = (
+                await db.scalars(select(ConversationHistory.organization_id).distinct())
             ).all()
             artifact_organizations = (
                 await db.scalars(select(Artifact.organization_id).distinct())
@@ -74,6 +80,11 @@ async def reconcile_once(
                     removed = await cleanup_expired_receipts(db, organization_id)
                 if removed < 100:
                     break
+        for organization_id in history_organizations:
+            async with unit_of_work(factory, organization_id=organization_id) as db:
+                organization = await db.get(Organization, organization_id, with_for_update=True)
+                if organization is not None:
+                    await cleanup_history(db, organization)
         storage = ArtifactStorage(get_settings().artifact_root)
         filesystem_organizations = await asyncio.to_thread(storage.organizations)
         for organization_id in set(artifact_organizations) | set(filesystem_organizations):

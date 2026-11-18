@@ -14,6 +14,7 @@ from dialogentis.contracts import InputModel
 from dialogentis.db import unit_of_work
 from dialogentis.runtime.conversations import _locked_row
 from dialogentis.runtime.executor import ExecutionError
+from dialogentis.runtime.history_models import ConversationHistory
 from dialogentis.runtime.receipt_models import RuntimeReceipt
 from dialogentis.runtime.routes import ConversationToken, IdempotencyKey, service
 from dialogentis.runtime.test_chat import ChatResponse, InvalidVersionFlow
@@ -151,6 +152,10 @@ async def close(
         if row.processing_token is not None:
             raise HTTPException(409, "Ход уже обрабатывается", headers={"Retry-After": "1"})
         row.checkpoint = None
+        history = await db.get(ConversationHistory, (access.organization_id, conversation_id))
+        if history is not None and history.status == "waiting_input":
+            history.status = "completed"
+            history.last_activity_at = now
         await db.execute(
             update(RuntimeReceipt)
             .where(

@@ -27,6 +27,7 @@ from dialogentis.runtime.checkpoint import (
     encrypt_checkpoint,
 )
 from dialogentis.runtime.core import RuntimeState
+from dialogentis.runtime.history import start_history
 from dialogentis.runtime.models import TestConversation
 from dialogentis.versions.models import AgentVersion
 from dialogentis.versions.prepare import version_status
@@ -141,6 +142,7 @@ async def create_conversation(
         else None
     )
     db.add(row)
+    start_history(db, row, status=state.status)
     await db.flush()
     return ConversationSnapshot(row.id, row.revision, state, credential)
 

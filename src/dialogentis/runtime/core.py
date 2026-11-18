@@ -2,8 +2,9 @@
 
 import hashlib
 import json
+import re
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from time import monotonic
 from typing import Literal, cast
 from uuid import UUID
@@ -32,6 +33,7 @@ MAX_TRANSITIONS = 50
 MAX_SECONDS = 20
 FALLBACK_REASONS = {"empty_features", "low_score", "ambiguous_intent", "low_similarity"}
 SAFE_FAILURE = "Не удалось выполнить сценарий. Попробуйте позже."
+MASKED = "[скрыто]"
 
 
 class RuntimeFault(ValueError):
@@ -90,6 +92,7 @@ class TraceEvent:
     event: str
     output: str | None = None
     fallback_reasons: tuple[str, ...] = ()
+    version_id: UUID | None = None
 
 
 @dataclass(frozen=True)
@@ -98,6 +101,8 @@ class RuntimeResult:
     messages: tuple[str, ...]
     trace: tuple[TraceEvent, ...]
     error_code: str | None = None
+    history_input: str | None = field(default=None, repr=False)
+    history_messages: tuple[str, ...] | None = field(default=None, repr=False)
 
 
 def semantic_hash(
@@ -336,6 +341,49 @@ class RuntimeEngine:
         callers = callers if callers is not None else []
         active = path[-1]
         input_consumed = False
+        private_input = False
+        private_values: set[str] = set()
+
+        def collect(engine: RuntimeEngine, slots: dict) -> None:
+            for code, value in slots.items():
+                if value is not None and engine._slot_by_code[code].sensitive:
+                    if type(value) is bool:
+                        private_values.update(("true", "да") if value else ("false", "нет"))
+                    elif value != "":
+                        private_values.add(str(value))
+
+        for caller in callers:
+            collect(path[caller.path_index], dict(caller.slot_values))
+
+        def record(event: TraceEvent) -> None:
+            trace.append(replace(event, version_id=active._version))
+
+        def result(status: Literal["waiting_input", "completed", "failed"], code=None):
+            tokens = sorted(private_values, key=lambda value: (-len(value), value))
+            redact_all = len(tokens) > 200 or sum(map(len, tokens)) > 40_000
+            pattern = (
+                re.compile("|".join(map(re.escape, tokens)), re.IGNORECASE)
+                if tokens and not redact_all
+                else None
+            )
+
+            def redact(value: str) -> str:
+                if redact_all:
+                    return MASKED
+                return (pattern.sub(MASKED, value) if pattern else value)[:4000]
+
+            return RuntimeResult(
+                state(status),
+                tuple(messages),
+                tuple(trace),
+                code,
+                None
+                if turn == 0 or initial_input is None or status == "failed"
+                else (MASKED if private_input else redact(initial_input)),
+                tuple(redact(message) for message in messages),
+            )
+
+        initial_input = text
 
         def state(status: Literal["waiting_input", "completed", "failed"]) -> RuntimeState:
             return RuntimeState(
@@ -357,14 +405,14 @@ class RuntimeEngine:
         def fail(code: str) -> RuntimeResult:
             nonlocal pending_ask
             failed_node = active._nodes.get(node_id)
-            trace.append(
+            record(
                 TraceEvent(node_id, failed_node.type if failed_node else "unknown", "error", code)
             )
             values.clear()
             attempts.clear()
             pending_ask = None
             messages.append(SAFE_FAILURE)
-            return RuntimeResult(state("failed"), tuple(messages), tuple(trace), code)
+            return result("failed", code)
 
         def move(node: FlowNode, handle: str) -> UUID:
             nonlocal transitions
@@ -374,7 +422,7 @@ class RuntimeEngine:
             transitions += 1
             if transitions > MAX_TRANSITIONS:
                 raise RuntimeFault("transition_limit")
-            trace.append(TraceEvent(node.id, node.type, "transition", handle))
+            record(TraceEvent(node.id, node.type, "transition", handle))
             return target
 
         def predict_message(message: str) -> Prediction:
@@ -438,6 +486,7 @@ class RuntimeEngine:
 
         try:
             while True:
+                collect(active, values)
                 if monotonic() > deadline:
                     raise RuntimeFault("turn_timeout")
                 node = active._nodes.get(node_id)
@@ -462,13 +511,13 @@ class RuntimeEngine:
                     node_id = move(node, "next")
                 elif node.type == "switch_intent":
                     if text is None:
-                        trace.append(TraceEvent(node.id, node.type, "wait"))
-                        return RuntimeResult(state("waiting_input"), tuple(messages), tuple(trace))
+                        record(TraceEvent(node.id, node.type, "wait"))
+                        return result("waiting_input")
                     prediction = predict_message(text)
                     if prediction.intent_id is None:
                         if not prediction.fallback_reasons:
                             raise RuntimeFault("invalid_nlu_result")
-                        trace.append(
+                        record(
                             TraceEvent(
                                 node.id,
                                 node.type,
@@ -537,20 +586,22 @@ class RuntimeEngine:
                         node_id = move(node, "next")
                     else:
                         source = active._slot_by_id.get(assignment.source_slot_id)
-                        value = (
-                            values.get(source.code)
-                            if assignment.source == "slot" and source
-                            else assignment.value
-                        )
+                        value = assignment.value
+                        if assignment.source == "slot":
+                            value = None
+                            if source and (slot.sensitive or not source.sensitive):
+                                value = values.get(source.code)
                         if value is None:
                             node_id = move(node, "error")
                         else:
                             values[slot.code] = cast(str | int | bool, value)
-                            trace.append(TraceEvent(node.id, node.type, "slot_set", str(slot.id)))
+                            record(TraceEvent(node.id, node.type, "slot_set", str(slot.id)))
                             node_id = move(node, "next")
                 elif node.type == "ask_slot":
                     ask = active._asks[node.id]
                     slot = active._slot_by_id[ask.slot_id]
+                    if slot.sensitive and text is not None:
+                        private_input = True
                     if valid_value(slot, values.get(slot.code), ask):
                         if pending_ask == node.id:
                             text = None
@@ -588,7 +639,7 @@ class RuntimeEngine:
                         values[slot.code] = value
                         fallback_count = 0
                         attempts.pop(node.id, None)
-                        trace.append(TraceEvent(node.id, node.type, "slot_filled", str(slot.id)))
+                        record(TraceEvent(node.id, node.type, "slot_filled", str(slot.id)))
                         node_id = move(node, "success")
                         continue
                     if (
@@ -601,20 +652,19 @@ class RuntimeEngine:
                         except SlotValueError:
                             extracted = None
                         if extracted is not None:
+                            private_input = private_input or slot.sensitive
                             values[slot.code] = extracted
                             entity_consumed = True
                             input_consumed = True
                             fallback_count = 0
                             attempts.pop(node.id, None)
-                            trace.append(
-                                TraceEvent(node.id, node.type, "slot_filled", str(slot.id))
-                            )
+                            record(TraceEvent(node.id, node.type, "slot_filled", str(slot.id)))
                             node_id = move(node, "success")
                             continue
                     messages.append(render_template(ask.prompt, active._slots, values))
                     pending_ask = node.id
-                    trace.append(TraceEvent(node.id, node.type, "wait"))
-                    return RuntimeResult(state("waiting_input"), tuple(messages), tuple(trace))
+                    record(TraceEvent(node.id, node.type, "wait"))
+                    return result("waiting_input")
                 elif node.type == "fallback":
                     messages.append(
                         render_template(str(node.config["text"]), active._slots, values)
@@ -625,11 +675,11 @@ class RuntimeEngine:
                         if isinstance(example, str) and example.strip():
                             messages.append(f"Например: {example.strip()}")
                         messages.append("Начните диалог заново и попробуйте другой запрос.")
-                        trace.append(TraceEvent(node.id, node.type, "fallback_limit"))
+                        record(TraceEvent(node.id, node.type, "fallback_limit"))
                         values.clear()
                         attempts.clear()
                         pending_ask = None
-                        return RuntimeResult(state("completed"), tuple(messages), tuple(trace))
+                        return result("completed")
                     raw = node.config.get("resume_node_id")
                     try:
                         resume = UUID(raw) if isinstance(raw, str) else None
@@ -640,10 +690,10 @@ class RuntimeEngine:
                     transitions += 1
                     if transitions > MAX_TRANSITIONS:
                         raise RuntimeFault("transition_limit")
-                    trace.append(TraceEvent(node.id, node.type, "wait"))
+                    record(TraceEvent(node.id, node.type, "wait"))
                     assert resume is not None
                     node_id = resume
-                    return RuntimeResult(state("waiting_input"), tuple(messages), tuple(trace))
+                    return result("waiting_input")
                 elif node.type == "handoff":
                     config = active._handoffs[node.id]
                     if len(path) > MAX_HANDOFF_DEPTH:
@@ -665,7 +715,7 @@ class RuntimeEngine:
                     transitions += 1
                     if transitions > MAX_TRANSITIONS:
                         raise RuntimeFault("transition_limit")
-                    trace.append(TraceEvent(node.id, node.type, "handoff", str(target._version)))
+                    record(TraceEvent(node.id, node.type, "handoff", str(target._version)))
                     if config.mode == "call":
                         callers.append(
                             SuspendedFrame(
@@ -706,7 +756,7 @@ class RuntimeEngine:
                         )
                     except ValueError:
                         branch = "error"
-                    trace.append(TraceEvent(node.id, node.type, "returned", str(parent._version)))
+                    record(TraceEvent(node.id, node.type, "returned", str(parent._version)))
                     del path[caller.path_index + 1 :]
                     active = parent
                     node_id = caller.node_id
@@ -718,11 +768,11 @@ class RuntimeEngine:
                     text_value = node.config.get("text")
                     if isinstance(text_value, str) and text_value:
                         messages.append(render_template(text_value, active._slots, values))
-                    trace.append(TraceEvent(node.id, node.type, "complete"))
+                    record(TraceEvent(node.id, node.type, "complete"))
                     values.clear()
                     attempts.clear()
                     pending_ask = None
-                    return RuntimeResult(state("completed"), tuple(messages), tuple(trace))
+                    return result("completed")
                 else:
                     raise RuntimeFault("unsupported_in_stage")
         except TemplateError as exc:

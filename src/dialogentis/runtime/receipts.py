@@ -112,6 +112,7 @@ class _Trace(BaseModel):
     event: str = Field(max_length=64)
     output: str | None = Field(default=None, max_length=128)
     fallback_reasons: tuple[str, ...] = Field(default=(), max_length=10)
+    version_id: UUID | None = None
 
 
 class ReceiptPayload(BaseModel):
@@ -121,6 +122,7 @@ class ReceiptPayload(BaseModel):
     messages: tuple[str, ...] = Field(max_length=52, repr=False)
     trace: tuple[_Trace, ...] = Field(max_length=120, repr=False)
     error_code: str | None = Field(default=None, max_length=64)
+    input_text: str | None = Field(default=None, max_length=4000, repr=False)
 
     @classmethod
     def from_result(
@@ -143,6 +145,7 @@ class ReceiptPayload(BaseModel):
                         "event": item.event,
                         "output": item.output,
                         "fallback_reasons": item.fallback_reasons,
+                        "version_id": item.version_id,
                     }
                     for item in trace
                 ],
@@ -151,8 +154,14 @@ class ReceiptPayload(BaseModel):
         )
 
 
-def seal_receipt(payload: ReceiptPayload, identity: ReceiptIdentity, settings: Settings) -> bytes:
-    key = _key(settings, b"payload-aes256gcm")
+def seal_receipt(
+    payload: ReceiptPayload,
+    identity: ReceiptIdentity,
+    settings: Settings,
+    *,
+    purpose: bytes = b"payload-aes256gcm",
+) -> bytes:
+    key = _key(settings, purpose)
     try:
         plain = payload.model_dump_json().encode("utf-8")
     except ValueError, UnicodeError:
@@ -164,8 +173,14 @@ def seal_receipt(payload: ReceiptPayload, identity: ReceiptIdentity, settings: S
     return header + nonce + AESGCM(key).encrypt(nonce, plain, identity.aad(header))
 
 
-def open_receipt(content: bytes, identity: ReceiptIdentity, settings: Settings) -> ReceiptPayload:
-    key = _key(settings, b"payload-aes256gcm")
+def open_receipt(
+    content: bytes,
+    identity: ReceiptIdentity,
+    settings: Settings,
+    *,
+    purpose: bytes = b"payload-aes256gcm",
+) -> ReceiptPayload:
+    key = _key(settings, purpose)
     if not isinstance(content, bytes) or not 36 <= len(content) <= MAX_RECEIPT + 36:
         raise ReceiptError()
     header = content[:8]

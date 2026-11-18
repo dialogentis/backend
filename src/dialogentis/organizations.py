@@ -26,6 +26,7 @@ from dialogentis.auth.security import VerifiedUser, check_password, digest, rate
 from dialogentis.contracts import CursorPage, InputModel, revision_etag
 from dialogentis.dependencies import Database
 from dialogentis.models import Base, Membership, Organization, User
+from dialogentis.runtime.history import cleanup_history
 from dialogentis.runtime.receipt_models import RuntimeReceipt
 
 router = APIRouter(prefix="/api/v1", tags=["organizations"])
@@ -339,6 +340,8 @@ async def update_organization(
             )
             .values(encrypted_response=None)
         )
+    if body.purge_existing_text or body.history_retention_days is not None:
+        await cleanup_history(db, org, purge_text=bool(body.purge_existing_text))
     org.settings_revision += 1
     audit(db, org_id, user, "organization.settings_changed", org_id)
     await db.flush()

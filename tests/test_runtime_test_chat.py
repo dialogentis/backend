@@ -199,7 +199,7 @@ async def test_mock_and_live_http_actions_use_organization_policy(app, monkeypat
         assert live["messages"] == ["Статус: отправлен"]
         assert "private-token" not in started.text and "данные" not in started.text
         repeated = await owner.post(start_url, json=body, headers=key)
-        assert repeated.json() == {**live, "replayed": True}
+        assert repeated.json() == {**live, "replayed": True, "messages": ["Статус: [скрыто]"]}
         assert (
             await owner.post(start_url, json={**body, "http_mode": "mock"}, headers=key)
         ).status_code == 409

@@ -155,6 +155,8 @@ def main() -> None:
     output = {
         "state": result.state.model_dump(mode="json"),
         "messages": result.messages,
+        "history_input": result.history_input,
+        "history_messages": result.history_messages,
         "trace": [asdict(event) for event in result.trace],
         "error_code": result.error_code,
     }
