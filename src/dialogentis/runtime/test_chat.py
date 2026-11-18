@@ -19,7 +19,7 @@ from dialogentis.flow_validation import validate_flow
 from dialogentis.http_action import HttpActionConfig, MockIntegration, mock_http_action
 from dialogentis.integrations.models import Integration
 from dialogentis.jobs.models import Job
-from dialogentis.models import User
+from dialogentis.models import Agent, User
 from dialogentis.nlu.model_store import ModelIdentity
 from dialogentis.organizations import organization_context
 from dialogentis.runtime.core import Prediction, RuntimeEngine, RuntimeResult, TraceEvent
@@ -303,6 +303,9 @@ class TestChatService:
             async with unit_of_work(self.factory, organization_id=org_id, user_id=user_id) as db:
                 user = await self._user(db, user_id)
                 bundle = await self._bundle(db, user, org_id, agent_id, version_id)
+                agent = await db.get(Agent, agent_id)
+                if agent is None or agent.status != "active":
+                    raise HTTPException(409, "Архивный агент недоступен для нового диалога")
                 initial = await asyncio.to_thread(
                     lambda: RuntimeEngine(
                         version_id,

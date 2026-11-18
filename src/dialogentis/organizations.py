@@ -17,6 +17,7 @@ from sqlalchemy import (
     text,
     update,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -38,6 +39,7 @@ Permission = Literal[
     "revoke_lease",
     "manage_settings",
     "manage_integrations",
+    "publish_agents",
 ]
 ROLE_PERMISSIONS: dict[str, frozenset[Permission]] = {
     "owner": frozenset(
@@ -50,6 +52,7 @@ ROLE_PERMISSIONS: dict[str, frozenset[Permission]] = {
             "revoke_lease",
             "manage_settings",
             "manage_integrations",
+            "publish_agents",
         }
     ),
     "admin": frozenset(
@@ -59,6 +62,7 @@ ROLE_PERMISSIONS: dict[str, frozenset[Permission]] = {
             "revoke_lease",
             "manage_settings",
             "manage_integrations",
+            "publish_agents",
         }
     ),
     "editor": frozenset({"manage_agents"}),
@@ -86,6 +90,7 @@ class AuditEvent(Base):
     action: Mapped[str] = mapped_column(String(64))
     target_id: Mapped[UUID] = mapped_column()
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    details: Mapped[dict] = mapped_column(JSONB, default=dict, server_default="{}")
 
 
 class OrganizationDeletion(Base):
@@ -223,13 +228,22 @@ async def organization_context(
     return membership
 
 
-def audit(db: Database, org_id: UUID, user: User, action: str, target: UUID):
+def audit(
+    db: Database,
+    org_id: UUID,
+    user: User,
+    action: str,
+    target: UUID,
+    *,
+    details: dict | None = None,
+):
     db.add(
         AuditEvent(
             organization_id=org_id,
             actor_id=user.id,
             action=action,
             target_id=target,
+            details=details or {},
             created_at=datetime.now(UTC),
         )
     )

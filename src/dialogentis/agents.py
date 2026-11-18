@@ -12,6 +12,7 @@ from dialogentis.contracts import CursorPage, InputModel, revision_etag
 from dialogentis.dependencies import Database
 from dialogentis.models import Agent, AgentDraft
 from dialogentis.organizations import audit, organization_context
+from dialogentis.versions.release_models import ReleaseVersion
 
 router = APIRouter(prefix="/api/v1/organizations/{org_id}/agents", tags=["agents"])
 
@@ -72,6 +73,7 @@ class AgentView(BaseModel):
     status: Literal["active", "archived"]
     revision: int
     draft_revision: int
+    current_release_id: UUID | None
 
 
 def view(agent: Agent, draft: AgentDraft) -> AgentView:
@@ -85,6 +87,7 @@ def view(agent: Agent, draft: AgentDraft) -> AgentView:
         status=agent.status,
         revision=agent.revision,
         draft_revision=draft.revision,
+        current_release_id=agent.current_release_id,
     )
 
 
@@ -152,6 +155,7 @@ async def list_agents(
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
     cursor: UUID | None = None,
     status: Literal["active", "archived"] | None = None,
+    published: bool | None = None,
     q: Annotated[str | None, Query(max_length=120)] = None,
 ):
     await organization_context(db, user, org_id)
@@ -166,6 +170,12 @@ async def list_agents(
         query = query.where(Agent.id > cursor)
     if status is not None:
         query = query.where(Agent.status == status)
+    if published is not None:
+        query = query.where(
+            Agent.current_release_id.is_not(None)
+            if published
+            else Agent.current_release_id.is_(None)
+        )
     if q and q.strip():
         search = q.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         query = query.where(
@@ -493,6 +503,47 @@ async def set_archived(
     agent, draft = await agent_and_draft(db, org_id, agent_id)
     status: Literal["active", "archived"] = "archived" if archived else "active"
     if agent.status != status:
+        if (
+            archived
+            and await db.scalar(
+                select(Agent.id)
+                .join(
+                    ReleaseVersion,
+                    (ReleaseVersion.organization_id == Agent.organization_id)
+                    & (ReleaseVersion.release_id == Agent.current_release_id),
+                )
+                .where(
+                    Agent.organization_id == org_id,
+                    Agent.status == "active",
+                    Agent.id != agent_id,
+                    ReleaseVersion.agent_id == agent_id,
+                )
+                .limit(1)
+            )
+            is not None
+        ):
+            raise HTTPException(409, "Агент используется текущей публикацией другого агента")
+        if (
+            not archived
+            and agent.current_release_id is not None
+            and await db.scalar(
+                select(Agent.id)
+                .join(
+                    ReleaseVersion,
+                    (ReleaseVersion.organization_id == Agent.organization_id)
+                    & (ReleaseVersion.agent_id == Agent.id),
+                )
+                .where(
+                    Agent.organization_id == org_id,
+                    Agent.status == "archived",
+                    Agent.id != agent_id,
+                    ReleaseVersion.release_id == agent.current_release_id,
+                )
+                .limit(1)
+            )
+            is not None
+        ):
+            raise HTTPException(409, "Сначала восстановите из архива зависимого агента")
         agent.status = status
         agent.revision += 1
         audit(db, org_id, user, "agent.archived" if archived else "agent.restored", agent.id)

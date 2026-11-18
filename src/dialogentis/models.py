@@ -73,9 +73,16 @@ class Agent(Base):
     language: Mapped[str] = mapped_column(String(2), default="ru")
     status: Mapped[Literal["active", "archived"]] = mapped_column(String(16), default="active")
     revision: Mapped[int] = mapped_column(default=1, server_default=text("1"))
+    current_release_id: Mapped[UUID | None] = mapped_column()
     __table_args__ = (
         UniqueConstraint("organization_id", "id"),
         UniqueConstraint("organization_id", "slug"),
+        ForeignKeyConstraint(
+            ["organization_id", "id", "current_release_id"],
+            ["releases.organization_id", "releases.agent_id", "releases.id"],
+            name="fk_agents_current_release",
+            use_alter=True,
+        ),
         CheckConstraint("language = 'ru'"),
         CheckConstraint("status IN ('active','archived')"),
         CheckConstraint("revision > 0"),

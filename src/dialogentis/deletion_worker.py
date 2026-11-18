@@ -1,7 +1,7 @@
 import asyncio
 from datetime import UTC, datetime
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from dialogentis.artifact_records import Artifact
@@ -17,6 +17,7 @@ from dialogentis.jobs.models import Job, OutboxEvent
 from dialogentis.models import Agent, AgentDraft, Membership, Organization
 from dialogentis.organizations import AuditEvent, Invitation, OrganizationDeletion
 from dialogentis.versions.models import AgentVersion
+from dialogentis.versions.release_models import Release
 
 
 async def purge_tenant(
@@ -45,6 +46,12 @@ async def purge_tenant(
     keep_job_id = record.job_id if record is not None else None
     await db.execute(delete(ExportTask).where(ExportTask.organization_id == organization_id))
     await db.execute(delete(ImportTask).where(ImportTask.organization_id == organization_id))
+    await db.execute(
+        update(Agent)
+        .where(Agent.organization_id == organization_id)
+        .values(current_release_id=None)
+    )
+    await db.execute(delete(Release).where(Release.organization_id == organization_id))
     await db.execute(delete(AgentVersion).where(AgentVersion.organization_id == organization_id))
     await db.execute(delete(Artifact).where(Artifact.organization_id == organization_id))
     outbox = delete(OutboxEvent).where(OutboxEvent.organization_id == organization_id)

@@ -18,6 +18,13 @@ from dialogentis.versions.models import AgentVersion
 async def validate_handoff_dependencies(
     db: AsyncSession, org_id: UUID, agent_id: UUID, config: dict
 ) -> list[Issue]:
+    errors, _ = await resolve_handoff_dependencies(db, org_id, agent_id, config)
+    return errors
+
+
+async def resolve_handoff_dependencies(
+    db: AsyncSession, org_id: UUID, agent_id: UUID, config: dict
+) -> tuple[list[Issue], list[AgentVersion]]:
     versions: dict[UUID, AgentVersion | None] = {}
     validated: dict[UUID, tuple[int, frozenset[UUID]]] = {}
 
@@ -100,4 +107,4 @@ async def validate_handoff_dependencies(
         issues.append(
             Issue(("flow", "nodes", index, "config"), "invalid_handoff_dependency", message)
         )
-    return issues
+    return issues, [version for version in versions.values() if version is not None]
