@@ -10,6 +10,7 @@ from dialogentis.conditions import ConditionConfig, validate_condition
 from dialogentis.datasets.schema import Entity, Intent
 from dialogentis.datasets.validation import Issue
 from dialogentis.flow_schema import Flow
+from dialogentis.handoff import handoff_outputs, validate_handoff_references
 from dialogentis.http_action import HTTP_OUTPUTS, HttpActionConfig, check_http_references
 from dialogentis.set_slot import SetSlotConfig, check_set_config
 from dialogentis.slots import validate_slots
@@ -50,6 +51,7 @@ def validate_flow(config: dict) -> tuple[list[Issue], list[Issue]]:
     warnings: list[Issue] = []
     slots, slot_errors = validate_slots(config.get("slots", []))
     errors.extend(slot_errors)
+    errors.extend(validate_handoff_references(flow, slots, complete=True))
     slot_by_id = {slot.id: slot for slot in slots}
     entity_by_id = {}
     if any(node.type == "ask_slot" for node in flow.nodes):
@@ -151,6 +153,7 @@ def validate_flow(config: dict) -> tuple[list[Issue], list[Issue]]:
             "ask_slot": {"success", "invalid", "exhausted"},
             "set_slot": {"next", "error"},
             "http_action": set(HTTP_OUTPUTS),
+            "handoff": set(handoff_outputs(str(source_node.config.get("mode", "call")))),
         }
         if source_node.type == "condition":
             try:
@@ -163,9 +166,14 @@ def validate_flow(config: dict) -> tuple[list[Issue], list[Issue]]:
                 Issue((*path, "source_handle"), "invalid_output", "У этого блока нет такого выхода")
             )
         adjacency[edge.source].append(edge.target)
-        if source_node.type in {"start", "say", "set_slot", "condition", "http_action"} or (
-            source_node.type == "ask_slot" and edge.source_handle == "success"
-        ):
+        if source_node.type in {
+            "start",
+            "say",
+            "set_slot",
+            "condition",
+            "http_action",
+            "handoff",
+        } or (source_node.type == "ask_slot" and edge.source_handle == "success"):
             immediate[edge.source].append(edge.target)
 
     for index, node in enumerate(flow.nodes):
@@ -202,6 +210,9 @@ def validate_flow(config: dict) -> tuple[list[Issue], list[Issue]]:
             "ask_slot": ("success", "invalid", "exhausted"),
             "set_slot": ("next", "error"),
             "http_action": HTTP_OUTPUTS,
+            "handoff": handoff_outputs(str(node.config.get("mode", "call")))
+            if node.type == "handoff"
+            else (),
         }
         for handle in required.get(node.type, ()):
             if (node.id, handle) not in handles:

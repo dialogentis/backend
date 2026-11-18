@@ -16,6 +16,7 @@ from dialogentis.datasets.schema import Entity, Intent
 from dialogentis.datasets.validation import normalize_example
 from dialogentis.flow_schema import Flow, FlowNode
 from dialogentis.flow_validation import validate_flow
+from dialogentis.handoff import MAX_HANDOFF_DEPTH, HandoffConfig, ReturnConfig, check_mapping
 from dialogentis.http_action import (
     HTTP_OUTPUTS,
     HttpActionConfig,
@@ -56,19 +57,30 @@ class Prediction:
     entities: tuple[EntityValue, ...] = field(default=(), repr=False)
 
 
-class RuntimeState(BaseModel):
+class FrameState(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
-    version_id: UUID
-    flow_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     node_id: UUID
-    status: Literal["waiting_input", "completed", "failed"]
-    turn: int = Field(ge=0)
     fallback_count: int = Field(ge=0, le=3)
     pending_ask: UUID | None = None
     slot_values: tuple[tuple[str, StrictBool | StrictInt | StrictStr | None], ...] = Field(
         default=(), repr=False
     )
     attempts: tuple[tuple[UUID, StrictInt], ...] = Field(default=(), repr=False)
+
+
+class SuspendedFrame(FrameState):
+    path_index: int = Field(ge=0, lt=MAX_HANDOFF_DEPTH)
+
+
+class RuntimeState(FrameState):
+    version_id: UUID
+    flow_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    status: Literal["waiting_input", "completed", "failed"]
+    turn: int = Field(ge=0)
+    active_path: tuple[UUID, ...] = Field(default=(), max_length=MAX_HANDOFF_DEPTH)
+    callers: tuple[SuspendedFrame, ...] = Field(
+        default=(), max_length=MAX_HANDOFF_DEPTH, repr=False
+    )
 
 
 @dataclass(frozen=True)
@@ -134,6 +146,7 @@ class RuntimeEngine:
         *,
         mock_integrations: list[MockIntegration] | None = None,
         http_handler: Callable[[UUID, dict], tuple[str, dict]] | None = None,
+        resolve_version: Callable[[UUID], RuntimeEngine | None] | None = None,
     ):
         errors, _ = validate_flow(config)
         if errors:
@@ -176,6 +189,12 @@ class RuntimeEngine:
             {item.id: item for item in mock_integrations} if mock_integrations is not None else None
         )
         self._http_handler = http_handler
+        self._resolve_version = resolve_version
+        self._handoffs = {
+            node.id: HandoffConfig.model_validate(node.config)
+            for node in self._flow.nodes
+            if node.type == "handoff"
+        }
         self._conditions = {
             node.id: ConditionConfig.model_validate(node.config)
             for node in self._flow.nodes
@@ -216,6 +235,52 @@ class RuntimeEngine:
             raise RuntimeFault("version_mismatch")
         if state.status != "waiting_input":
             raise RuntimeFault("conversation_finished")
+        path = [self, *(self._target(version) for version in state.active_path)]
+        if len({engine._version for engine in path}) != len(path):  # noqa: SLF001
+            raise RuntimeFault("invalid_checkpoint")
+        indices = [frame.path_index for frame in state.callers]
+        if indices != sorted(set(indices)) or any(index >= len(path) - 1 for index in indices):
+            raise RuntimeFault("invalid_checkpoint")
+        for frame in state.callers:
+            parent = path[frame.path_index]
+            parent._check_frame(frame)  # noqa: SLF001
+            call = parent._handoffs.get(frame.node_id)  # noqa: SLF001
+            if (
+                call is None
+                or call.mode != "call"
+                or call.target_version_id != path[frame.path_index + 1]._version  # noqa: SLF001
+            ):
+                raise RuntimeFault("invalid_checkpoint")
+        current = path[-1]
+        current._check_frame(state)  # noqa: SLF001
+        if not isinstance(text, str) or not 1 <= len(text) <= 2000:
+            raise RuntimeFault("invalid_message")
+        try:
+            text.encode("utf-8")
+        except UnicodeError:
+            raise RuntimeFault("invalid_message") from None
+        stored = dict(state.slot_values)
+        stored.update(values or {})
+        current._check_values(stored, "invalid_slot_values")  # noqa: SLF001
+        return self._run(
+            state.node_id,
+            text,
+            state.turn + 1,
+            state.fallback_count,
+            stored,
+            dict(state.attempts),
+            state.pending_ask,
+            path,
+            list(state.callers),
+        )
+
+    def _target(self, version_id: UUID) -> RuntimeEngine:
+        engine = self._resolve_version(version_id) if self._resolve_version is not None else None
+        if engine is None or engine._version != version_id:
+            raise RuntimeFault("handoff_target_unavailable")
+        return engine
+
+    def _check_frame(self, state: FrameState) -> None:
         if state.node_id not in self._nodes or state.fallback_count >= 3:
             raise RuntimeFault("invalid_checkpoint")
         if state.pending_ask is not None and (
@@ -232,23 +297,6 @@ class RuntimeEngine:
         ):
             raise RuntimeFault("invalid_checkpoint")
         self._check_values(stored, "invalid_checkpoint")
-        if not isinstance(text, str) or not 1 <= len(text) <= 2000:
-            raise RuntimeFault("invalid_message")
-        try:
-            text.encode("utf-8")
-        except UnicodeError:
-            raise RuntimeFault("invalid_message") from None
-        stored.update(values or {})
-        self._check_values(stored, "invalid_slot_values")
-        return self._run(
-            state.node_id,
-            text,
-            state.turn + 1,
-            state.fallback_count,
-            stored,
-            attempts,
-            state.pending_ask,
-        )
 
     def _check_values(self, values: dict, code: str) -> None:
         for key, value in values.items():
@@ -273,6 +321,8 @@ class RuntimeEngine:
         values: dict,
         attempts: dict[UUID, int],
         pending_ask: UUID | None,
+        path: list[RuntimeEngine] | None = None,
+        callers: list[SuspendedFrame] | None = None,
     ) -> RuntimeResult:
         messages: list[str] = []
         trace: list[TraceEvent] = []
@@ -282,6 +332,10 @@ class RuntimeEngine:
         original_text = text
         last_prediction: Prediction | None = None
         entity_consumed = False
+        path = path if path is not None else [self]
+        callers = callers if callers is not None else []
+        active = path[-1]
+        input_consumed = False
 
         def state(status: Literal["waiting_input", "completed", "failed"]) -> RuntimeState:
             return RuntimeState(
@@ -294,11 +348,15 @@ class RuntimeEngine:
                 pending_ask=pending_ask,
                 slot_values=tuple(sorted(values.items())),
                 attempts=tuple((node, attempts[node]) for node in sorted(attempts, key=str)),
+                active_path=tuple(engine._version for engine in path[1:])
+                if status == "waiting_input"
+                else (),
+                callers=tuple(callers) if status == "waiting_input" else (),
             )
 
         def fail(code: str) -> RuntimeResult:
             nonlocal pending_ask
-            failed_node = self._nodes.get(node_id)
+            failed_node = active._nodes.get(node_id)
             trace.append(
                 TraceEvent(node_id, failed_node.type if failed_node else "unknown", "error", code)
             )
@@ -310,8 +368,8 @@ class RuntimeEngine:
 
         def move(node: FlowNode, handle: str) -> UUID:
             nonlocal transitions
-            target = self._edges.get((node.id, handle))
-            if target is None or target not in self._nodes:
+            target = active._edges.get((node.id, handle))
+            if target is None or target not in active._nodes:
                 raise RuntimeFault("missing_output")
             transitions += 1
             if transitions > MAX_TRANSITIONS:
@@ -321,7 +379,7 @@ class RuntimeEngine:
 
         def predict_message(message: str) -> Prediction:
             try:
-                prediction = self._predict(message)
+                prediction = active._predict(message)
             except Exception:
                 raise RuntimeFault("nlu_error") from None
             # shortcut: synchronous prediction needs a preemptive outer timeout.
@@ -329,7 +387,7 @@ class RuntimeEngine:
                 raise RuntimeFault("turn_timeout")
             if not isinstance(prediction, Prediction):
                 raise RuntimeFault("invalid_nlu_result")
-            if prediction.version_id != self._version:
+            if prediction.version_id != active._version:
                 raise RuntimeFault("model_version_mismatch")
             if (
                 not isinstance(prediction.fallback_reasons, tuple)
@@ -348,7 +406,7 @@ class RuntimeEngine:
         ) -> str | int | bool | None:
             if ask.entity_id is None:
                 return None
-            entity = self._entity_by_id[ask.entity_id]
+            entity = active._entity_by_id[ask.entity_id]
             matches = [item for item in prediction.entities if item.entity_id == entity.id]
             if not matches:
                 return None
@@ -382,7 +440,7 @@ class RuntimeEngine:
             while True:
                 if monotonic() > deadline:
                     raise RuntimeFault("turn_timeout")
-                node = self._nodes.get(node_id)
+                node = active._nodes.get(node_id)
                 if node is None:
                     raise RuntimeFault("invalid_checkpoint")
                 if node.type in {"start", "switch_intent", "say", "fallback", "end"}:
@@ -398,7 +456,9 @@ class RuntimeEngine:
                 if node.type == "start":
                     node_id = move(node, "next")
                 elif node.type == "say":
-                    messages.append(render_template(str(node.config["text"]), self._slots, values))
+                    messages.append(
+                        render_template(str(node.config["text"]), active._slots, values)
+                    )
                     node_id = move(node, "next")
                 elif node.type == "switch_intent":
                     if text is None:
@@ -421,7 +481,7 @@ class RuntimeEngine:
                         if (
                             not isinstance(prediction.intent_id, UUID)
                             or prediction.fallback_reasons
-                            or prediction.intent_id not in self._enabled
+                            or prediction.intent_id not in active._enabled
                         ):
                             raise RuntimeFault("invalid_nlu_result")
                         handle = str(prediction.intent_id)
@@ -430,26 +490,26 @@ class RuntimeEngine:
                     last_prediction = prediction
                     node_id = move(node, handle)
                 elif node.type == "condition":
-                    handle = choose_branch(self._conditions[node.id], self._slot_by_id, values)
+                    handle = choose_branch(active._conditions[node.id], active._slot_by_id, values)
                     node_id = move(node, handle)
                 elif node.type == "http_action" and (
-                    self._mock_integrations is not None or self._http_handler is not None
+                    active._mock_integrations is not None or active._http_handler is not None
                 ):
                     http_actions += 1
                     if http_actions > 3:
                         raise RuntimeFault("http_action_limit")
-                    action = self._http_actions[node.id]
-                    if self._http_handler is not None:
+                    action = active._http_actions[node.id]
+                    if active._http_handler is not None:
                         codes = {
-                            self._slot_by_id[slot_id].code
+                            active._slot_by_id[slot_id].code
                             for mapping in (action.query, action.body)
                             for slot_id in mapping.values()
                         }
-                        outcome, updates = self._http_handler(
+                        outcome, updates = active._http_handler(
                             node.id, {code: values.get(code) for code in codes}
                         )
                         allowed = {
-                            self._slot_by_id[slot_id].code
+                            active._slot_by_id[slot_id].code
                             for slot_id in action.response_mapping.values()
                         }
                         if (
@@ -458,25 +518,25 @@ class RuntimeEngine:
                             or (set(updates) - allowed or (outcome != "success" and updates))
                         ):
                             raise RuntimeFault("invalid_http_result")
-                        self._check_values(updates, "invalid_http_result")
+                        active._check_values(updates, "invalid_http_result")
                         values.update(updates)
                     else:
-                        assert self._mock_integrations is not None
+                        assert active._mock_integrations is not None
                         outcome = mock_http_action(
                             action,
-                            self._mock_integrations.get(action.integration_id),
-                            self._slot_by_id,
+                            active._mock_integrations.get(action.integration_id),
+                            active._slot_by_id,
                             values,
                         )
                     node_id = move(node, outcome)
                 elif node.type == "set_slot":
-                    assignment = self._sets[node.id]
-                    slot = self._slot_by_id[assignment.slot_id]
+                    assignment = active._sets[node.id]
+                    slot = active._slot_by_id[assignment.slot_id]
                     if assignment.operation == "clear":
                         values[slot.code] = None
                         node_id = move(node, "next")
                     else:
-                        source = self._slot_by_id.get(assignment.source_slot_id)
+                        source = active._slot_by_id.get(assignment.source_slot_id)
                         value = (
                             values.get(source.code)
                             if assignment.source == "slot" and source
@@ -485,15 +545,16 @@ class RuntimeEngine:
                         if value is None:
                             node_id = move(node, "error")
                         else:
-                            values[slot.code] = value
+                            values[slot.code] = cast(str | int | bool, value)
                             trace.append(TraceEvent(node.id, node.type, "slot_set", str(slot.id)))
                             node_id = move(node, "next")
                 elif node.type == "ask_slot":
-                    ask = self._asks[node.id]
-                    slot = self._slot_by_id[ask.slot_id]
+                    ask = active._asks[node.id]
+                    slot = active._slot_by_id[ask.slot_id]
                     if valid_value(slot, values.get(slot.code), ask):
                         if pending_ask == node.id:
                             text = None
+                            input_consumed = True
                         pending_ask = None
                         attempts.pop(node.id, None)
                         node_id = move(node, "success")
@@ -502,6 +563,7 @@ class RuntimeEngine:
                     if text is not None:
                         answer = text
                         text = None
+                        input_consumed = True
                         pending_ask = None
                         try:
                             extracted = (
@@ -541,6 +603,7 @@ class RuntimeEngine:
                         if extracted is not None:
                             values[slot.code] = extracted
                             entity_consumed = True
+                            input_consumed = True
                             fallback_count = 0
                             attempts.pop(node.id, None)
                             trace.append(
@@ -548,12 +611,14 @@ class RuntimeEngine:
                             )
                             node_id = move(node, "success")
                             continue
-                    messages.append(render_template(ask.prompt, self._slots, values))
+                    messages.append(render_template(ask.prompt, active._slots, values))
                     pending_ask = node.id
                     trace.append(TraceEvent(node.id, node.type, "wait"))
                     return RuntimeResult(state("waiting_input"), tuple(messages), tuple(trace))
                 elif node.type == "fallback":
-                    messages.append(render_template(str(node.config["text"]), self._slots, values))
+                    messages.append(
+                        render_template(str(node.config["text"]), active._slots, values)
+                    )
                     fallback_count += 1
                     if fallback_count >= 3:
                         example = node.config.get("example")
@@ -570,7 +635,7 @@ class RuntimeEngine:
                         resume = UUID(raw) if isinstance(raw, str) else None
                     except ValueError:
                         resume = None
-                    if resume not in self._nodes:
+                    if resume not in active._nodes:
                         raise RuntimeFault("invalid_resume")
                     transitions += 1
                     if transitions > MAX_TRANSITIONS:
@@ -579,10 +644,80 @@ class RuntimeEngine:
                     assert resume is not None
                     node_id = resume
                     return RuntimeResult(state("waiting_input"), tuple(messages), tuple(trace))
-                elif node.type == "end":
+                elif node.type == "handoff":
+                    config = active._handoffs[node.id]
+                    if len(path) > MAX_HANDOFF_DEPTH:
+                        raise RuntimeFault("handoff_depth")
+                    if config.target_version_id in {engine._version for engine in path}:
+                        raise RuntimeFault("handoff_cycle")
+                    try:
+                        target = self._target(config.target_version_id)
+                        check_mapping(config.input_mapping, active._slot_by_id, target._slot_by_id)
+                        check_mapping(config.return_mapping, target._slot_by_id, active._slot_by_id)
+                        initial = target.initial_state(
+                            _map_slots(
+                                config.input_mapping, active._slot_by_id, target._slot_by_id, values
+                            )
+                        )
+                    except RuntimeFault, ValueError:
+                        node_id = move(node, "error")
+                        continue
+                    transitions += 1
+                    if transitions > MAX_TRANSITIONS:
+                        raise RuntimeFault("transition_limit")
+                    trace.append(TraceEvent(node.id, node.type, "handoff", str(target._version)))
+                    if config.mode == "call":
+                        callers.append(
+                            SuspendedFrame(
+                                path_index=len(path) - 1,
+                                node_id=node.id,
+                                fallback_count=fallback_count,
+                                pending_ask=pending_ask,
+                                slot_values=tuple(sorted(values.items())),
+                                attempts=tuple(attempts.items()),
+                            )
+                        )
+                    path.append(target)
+                    active = target
+                    node_id, values, attempts = initial.node_id, dict(initial.slot_values), {}
+                    fallback_count, pending_ask = 0, None
+                    text = (
+                        original_text
+                        if config.forward_current_message and not input_consumed
+                        else None
+                    )
+                    original_text, last_prediction, entity_consumed = text, None, False
+                elif node.type == "return" and callers:
+                    caller = callers.pop()
+                    parent = path[caller.path_index]
+                    call = parent._handoffs[caller.node_id]
+                    output = ReturnConfig.model_validate(node.config)
+                    exported = {
+                        source: destination
+                        for source, destination in call.return_mapping.items()
+                        if source in output.slot_ids
+                    }
+                    restored = dict(caller.slot_values)
+                    branch = "returned"
+                    try:
+                        check_mapping(exported, active._slot_by_id, parent._slot_by_id)
+                        restored.update(
+                            _map_slots(exported, active._slot_by_id, parent._slot_by_id, values)
+                        )
+                    except ValueError:
+                        branch = "error"
+                    trace.append(TraceEvent(node.id, node.type, "returned", str(parent._version)))
+                    del path[caller.path_index + 1 :]
+                    active = parent
+                    node_id = caller.node_id
+                    values, attempts = restored, dict(caller.attempts)
+                    fallback_count, pending_ask = caller.fallback_count, caller.pending_ask
+                    text, original_text, last_prediction, entity_consumed = None, None, None, False
+                    node_id = move(active._nodes[node_id], branch)
+                elif node.type in {"end", "return"}:
                     text_value = node.config.get("text")
                     if isinstance(text_value, str) and text_value:
-                        messages.append(render_template(text_value, self._slots, values))
+                        messages.append(render_template(text_value, active._slots, values))
                     trace.append(TraceEvent(node.id, node.type, "complete"))
                     values.clear()
                     attempts.clear()
@@ -594,3 +729,13 @@ class RuntimeEngine:
             return fail(exc.code)
         except RuntimeFault as exc:
             return fail(exc.code)
+
+
+def _map_slots(
+    mapping: dict[UUID, UUID], sources: dict[UUID, Slot], targets: dict[UUID, Slot], values: dict
+) -> dict:
+    return {
+        targets[target].code: values[sources[source].code]
+        for source, target in mapping.items()
+        if sources[source].code in values
+    }

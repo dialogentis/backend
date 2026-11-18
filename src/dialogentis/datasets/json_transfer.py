@@ -11,6 +11,12 @@ from dialogentis.contracts import InputModel
 from dialogentis.datasets.csv_import import MAX_ERRORS, MAX_FILE_BYTES, unique_object
 from dialogentis.datasets.schema import Dataset, Entity, Example, Intent, validate_dataset
 from dialogentis.flow_schema import Flow
+from dialogentis.handoff import (
+    HandoffDraftConfig,
+    ReturnConfig,
+    handoff_outputs,
+    validate_handoff_references,
+)
 from dialogentis.http_action import HTTP_OUTPUTS, HttpActionDraftConfig, validate_http_references
 from dialogentis.nlu.settings import NLUSettings, QualitySettings
 from dialogentis.set_slot import SetSlotDraftConfig
@@ -46,6 +52,8 @@ class PortableConfig(InputModel):
             raise ValueError("Duplicate or invalid slots")
         if validate_http_references(self.flow, self.slots):
             raise ValueError("Invalid HTTP action")
+        if validate_handoff_references(self.flow, self.slots):
+            raise ValueError("Invalid handoff action")
         allowed = {
             "start": set(),
             "switch_intent": set(),
@@ -56,6 +64,8 @@ class PortableConfig(InputModel):
             "set_slot": {"slot_id", "operation", "source", "source_slot_id", "value"},
             "condition": {"branches"},
             "http_action": set(HttpActionDraftConfig.model_fields),
+            "handoff": set(HandoffDraftConfig.model_fields),
+            "return": set(ReturnConfig.model_fields),
         }
         if self.flow.layout:
             raise ValueError("Unsupported layout")
@@ -127,6 +137,8 @@ class PortableConfig(InputModel):
                         ),
                     }
                     if nodes[edge.source].type == "condition"
+                    else handoff_outputs(str(nodes[edge.source].config.get("mode", "call")))
+                    if nodes[edge.source].type == "handoff"
                     else outputs.get(nodes[edge.source].type, set())
                 )
             ):

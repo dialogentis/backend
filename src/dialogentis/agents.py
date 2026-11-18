@@ -223,6 +223,13 @@ def copy_config(config: dict) -> dict:
     )
     from dialogentis.datasets.schema import Dataset
     from dialogentis.drafts import DraftConfig
+    from dialogentis.flow_schema import Flow
+    from dialogentis.handoff import (
+        HandoffDraftConfig,
+        ReturnConfig,
+        handoff_outputs,
+        validate_handoff_references,
+    )
     from dialogentis.http_action import HTTP_OUTPUTS, HttpActionDraftConfig, check_http_references
     from dialogentis.set_slot import SetSlotDraftConfig
     from dialogentis.slots import validate_slots
@@ -238,6 +245,8 @@ def copy_config(config: dict) -> dict:
     slots, slot_errors = validate_slots(result["slots"])
     if slot_errors:
         raise HTTPException(409, "Нельзя скопировать некорректные параметры")
+    if validate_handoff_references(Flow.model_validate(flow), slots):
+        raise HTTPException(409, "Нельзя скопировать некорректную передачу диалога")
     allowed = {
         "start": set(),
         "switch_intent": set(),
@@ -248,6 +257,8 @@ def copy_config(config: dict) -> dict:
         "set_slot": {"slot_id", "operation", "source", "source_slot_id", "value"},
         "condition": {"branches"},
         "http_action": set(HttpActionDraftConfig.model_fields),
+        "handoff": set(HandoffDraftConfig.model_fields),
+        "return": set(ReturnConfig.model_fields),
     }
     if flow["layout"]:
         raise HTTPException(409, "Копирование этого черновика пока недоступно")
@@ -266,6 +277,11 @@ def copy_config(config: dict) -> dict:
     ):
         raise HTTPException(409, "Нельзя скопировать сценарий с отсутствующими блоками")
     node_types = {node["id"]: node["type"] for node in flow["nodes"]}
+    handoffs = {
+        node["id"]: handoff_outputs(node["config"].get("mode", "call"))
+        for node in flow["nodes"]
+        if node["type"] == "handoff"
+    }
     intent_ids = {str(intent.id) for intent in dataset.intents}
     outputs = {
         "start": {"next"},
@@ -294,7 +310,7 @@ def copy_config(config: dict) -> dict:
         not in (
             {"else", *branch_mapping[edge["source"]]}
             if node_types[edge["source"]] == "condition"
-            else outputs.get(node_types[edge["source"]], set())
+            else handoffs.get(edge["source"], outputs.get(node_types[edge["source"]], set()))
         )
         for edge in flow["edges"]
     ):
@@ -369,6 +385,22 @@ def copy_config(config: dict) -> dict:
     clone["flow"]["flow_id"] = str(uuid4())
     for node in clone["flow"]["nodes"]:
         old_node_id = node["id"]
+        if node["type"] == "handoff":
+            config = node["config"]
+            if "input_mapping" in config:
+                config["input_mapping"] = {
+                    data_mapping["slots"][UUID(source)]: target
+                    for source, target in config["input_mapping"].items()
+                }
+            if "return_mapping" in config:
+                config["return_mapping"] = {
+                    source: data_mapping["slots"][UUID(target)]
+                    for source, target in config["return_mapping"].items()
+                }
+        if node["type"] == "return" and "slot_ids" in node["config"]:
+            node["config"]["slot_ids"] = [
+                data_mapping["slots"][UUID(slot_id)] for slot_id in node["config"]["slot_ids"]
+            ]
         if node["type"] == "http_action":
             for key in ("query", "body", "response_mapping"):
                 for name, reference in node["config"].get(key, {}).items():

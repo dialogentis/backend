@@ -23,7 +23,7 @@ from dialogentis.models import User
 from dialogentis.nlu.model_store import ModelIdentity
 from dialogentis.organizations import organization_context
 from dialogentis.runtime.core import Prediction, RuntimeEngine, RuntimeResult, TraceEvent
-from dialogentis.runtime.executor import ExecutionError, RuntimeExecutor
+from dialogentis.runtime.executor import ExecutionError, HttpHandler, RuntimeExecutor, RuntimeTarget
 from dialogentis.runtime.idempotency import (
     Replay,
     ReplayedStart,
@@ -166,7 +166,7 @@ class TestChatService:
                 bundle = await self._bundle(
                     db, await self._user(db, user_id), org_id, agent_id, version_id
                 )
-            return await self._execute_in_slot(action, bundle, state, text, live_http)
+            return await self._execute_in_slot(action, bundle, user_id, state, text, live_http)
 
         try:
             async with asyncio.timeout(20):
@@ -174,14 +174,7 @@ class TestChatService:
         except TimeoutError:
             raise ExecutionError("runtime_timeout") from None
 
-    async def _execute_in_slot(
-        self,
-        action: str,
-        bundle: _Bundle,
-        state=None,
-        text=None,
-        live_http: LiveHttpTurn | None = None,
-    ) -> RuntimeResult:
+    def _http_handler(self, bundle: _Bundle, live_http: LiveHttpTurn | None) -> HttpHandler | None:
         config = bundle.snapshot["config"]
         parsed_slots, errors = validate_slots(config.get("slots", []))
         if errors:
@@ -193,6 +186,8 @@ class TestChatService:
             if node["type"] == "http_action"
         }
         integrations = {item.id: item for item in bundle.mock_integrations}
+        if not actions:
+            return None
 
         async def handle_http(node_id: UUID, inputs: dict) -> tuple[str, dict]:
             http_action = actions[node_id]
@@ -214,6 +209,45 @@ class TestChatService:
             )
             return outcome, updates
 
+        return handle_http
+
+    async def _execute_in_slot(
+        self,
+        action: str,
+        bundle: _Bundle,
+        user_id: UUID,
+        state=None,
+        text=None,
+        live_http: LiveHttpTurn | None = None,
+    ) -> RuntimeResult:
+        async def load_target(agent_id: UUID, version_id: UUID) -> RuntimeTarget | None:
+            org_id = bundle.identity.organization_id
+            try:
+                async with unit_of_work(
+                    self.factory, organization_id=org_id, user_id=user_id
+                ) as db:
+                    target = await self._bundle(
+                        db, await self._user(db, user_id), org_id, agent_id, version_id
+                    )
+            except InvalidVersionFlow:
+                return None
+            except HTTPException as exc:
+                if exc.status_code in (404, 409):
+                    return None
+                raise
+            return RuntimeTarget(
+                target.identity,
+                target.snapshot,
+                target.config_hash,
+                target.model,
+                self._http_handler(target, live_http),
+            )
+
+        handler = self._http_handler(bundle, live_http)
+        has_handoff = any(
+            node["type"] == "handoff" for node in bundle.snapshot["config"]["flow"]["nodes"]
+        )
+        loader = load_target if has_handoff else None
         if action == "start":
             return await self.executor.execute(
                 action="start",
@@ -222,7 +256,8 @@ class TestChatService:
                 identity=bundle.identity,
                 model=bundle.model,
                 settings=self.settings,
-                http_handler=handle_http if actions else None,
+                http_handler=handler,
+                target_loader=loader,
             )
         return await self.executor.execute(
             action="send",
@@ -233,7 +268,8 @@ class TestChatService:
             settings=self.settings,
             state=state,
             text=text,
-            http_handler=handle_http if actions else None,
+            http_handler=handler,
+            target_loader=loader,
         )
 
     async def start(
@@ -294,7 +330,7 @@ class TestChatService:
                     if http_mode == "live"
                     else None
                 )
-                result = await self._execute_in_slot("start", bundle, live_http=live_http)
+                result = await self._execute_in_slot("start", bundle, user_id, live_http=live_http)
                 async with unit_of_work(
                     self.factory, organization_id=org_id, user_id=user_id
                 ) as db:

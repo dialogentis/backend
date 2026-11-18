@@ -7,11 +7,13 @@ import struct
 import sys
 import threading
 from dataclasses import asdict
+from functools import lru_cache
 from uuid import UUID
 
 from pydantic import SecretStr
 
 from dialogentis.config import Settings
+from dialogentis.handoff import MAX_HANDOFF_DEPTH
 from dialogentis.http_action import MockIntegration
 from dialogentis.nlu.model_store import ModelIdentity, unpack_model
 from dialogentis.runtime.core import RuntimeEngine, RuntimeState
@@ -34,7 +36,7 @@ def _watch_parent() -> None:
         os._exit(73)
 
 
-def _read_replies(replies: queue.Queue) -> None:
+def _read_replies(replies: queue.Queue, model_limit: int) -> None:
     def read_exact(size: int) -> bytes:
         data = bytearray()
         while len(data) < size:
@@ -46,10 +48,11 @@ def _read_replies(replies: queue.Queue) -> None:
 
     try:
         while True:
-            size = struct.unpack(">I", read_exact(4))[0]
-            if not 1 <= size <= MAX_RESPONSE:
+            size, model_size = struct.unpack(">II", read_exact(8))
+            if not 1 <= size <= MAX_REQUEST or not 0 <= model_size <= model_limit:
                 raise ValueError("Invalid response size")
-            replies.put(json.loads(read_exact(size)))
+            parsed = json.loads(read_exact(size))
+            replies.put((parsed, read_exact(model_size)))
     except Exception:
         os._exit(73)
 
@@ -72,10 +75,11 @@ def main() -> None:
     request = json.loads(_read_exact(request_size))
     model = _read_exact(model_size)
     replies: queue.Queue = queue.Queue(maxsize=1)
-    bridged = request.get("http_bridge") is True
+    handoff = request.get("handoff_bridge") is True
+    bridged = handoff or request.get("http_bridge") is True
     threading.Thread(
         target=_read_replies if bridged else _watch_parent,
-        args=(replies,) if bridged else (),
+        args=(replies, model_limit) if bridged else (),
         daemon=True,
     ).start()
     identity = ModelIdentity(
@@ -84,36 +88,64 @@ def main() -> None:
             for key in ("organization_id", "agent_id", "version_id", "artifact_id")
         )
     )
-    snapshot = request["snapshot"]
-    if snapshot["schema_version"] != 1 or canonical_hash(snapshot) != request["config_hash"]:
-        raise ValueError("Invalid snapshot")
     settings = Settings(
         _env_file=None,
         encryption_key=SecretStr(os.environ["DIALOGENTIS_RUNTIME_KEY"]),
         encryption_key_version=int(os.environ["DIALOGENTIS_RUNTIME_KEY_VERSION"]),
         max_model_artifact_bytes=model_limit,
     )
-    adapter = unpack_model(model, identity, settings)
-    mock_integrations = request["mock_integrations"]
 
-    def http_handler(node_id: UUID, values: dict) -> tuple[str, dict]:
-        _write_frame({"kind": "http_action", "node_id": str(node_id), "values": values})
-        reply = replies.get()
-        if not isinstance(reply, dict) or set(reply) != {"outcome", "updates"}:
-            raise ValueError("Invalid action response")
-        return reply["outcome"], reply["updates"]
+    @lru_cache(maxsize=MAX_HANDOFF_DEPTH)
+    def load_target(version_id: UUID) -> RuntimeEngine | None:
+        _write_frame({"kind": "handoff_target", "version_id": str(version_id)})
+        reply, target_model = replies.get()
+        if reply == {"kind": "unavailable"} and not target_model:
+            return None
+        if reply["kind"] != "target" or UUID(reply["version_id"]) != version_id:
+            raise ValueError("Invalid handoff target")
+        target_identity = ModelIdentity(
+            identity.organization_id,
+            UUID(reply["agent_id"]),
+            version_id,
+            UUID(reply["artifact_id"]),
+        )
+        return make_engine(target_identity, reply, target_model)
 
-    engine = RuntimeEngine(
-        identity.version_id,
-        snapshot["config"],
-        nlu_predictor(adapter),
-        mock_integrations=(
-            [MockIntegration.model_validate(item) for item in mock_integrations]
-            if mock_integrations is not None
-            else None
-        ),
-        http_handler=http_handler if bridged else None,
-    )
+    def make_engine(model_identity: ModelIdentity, payload: dict, artifact: bytes) -> RuntimeEngine:
+        snapshot = payload["snapshot"]
+        if snapshot["schema_version"] != 1 or canonical_hash(snapshot) != payload["config_hash"]:
+            raise ValueError("Invalid snapshot")
+        adapter = unpack_model(artifact, model_identity, settings)
+
+        def http_handler(node_id: UUID, values: dict) -> tuple[str, dict]:
+            _write_frame(
+                {
+                    "kind": "http_action",
+                    "node_id": str(node_id),
+                    "values": values,
+                    "version_id": str(model_identity.version_id),
+                }
+            )
+            reply, extra = replies.get()
+            if extra or not isinstance(reply, dict) or set(reply) != {"outcome", "updates"}:
+                raise ValueError("Invalid action response")
+            return reply["outcome"], reply["updates"]
+
+        mock_integrations = payload.get("mock_integrations")
+        return RuntimeEngine(
+            model_identity.version_id,
+            snapshot["config"],
+            nlu_predictor(adapter),
+            mock_integrations=(
+                [MockIntegration.model_validate(item) for item in mock_integrations]
+                if mock_integrations is not None
+                else None
+            ),
+            http_handler=http_handler if payload.get("http_bridge") is True else None,
+            resolve_version=load_target if handoff else None,
+        )
+
+    engine = make_engine(identity, request, model)
     if request["action"] == "start":
         result = engine.start()
     elif request["action"] == "send":

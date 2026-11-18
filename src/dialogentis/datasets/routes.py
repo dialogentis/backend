@@ -17,6 +17,7 @@ from dialogentis.datasets.validation import Issue
 from dialogentis.dependencies import Database
 from dialogentis.flow_schema import Flow
 from dialogentis.flow_validation import validate_intent_outputs
+from dialogentis.handoff import validate_handoff_references
 from dialogentis.http_action import validate_http_references
 from dialogentis.organizations import organization_context
 from dialogentis.set_slot import validate_set_references
@@ -117,6 +118,7 @@ def validate_configuration(config: dict) -> tuple[list[Issue], list[Issue]]:
         *validate_ask_references(flow, slots, dataset.entities),
         *validate_set_references(flow, slots),
         *validate_http_references(flow, slots),
+        *validate_handoff_references(flow, slots),
         *validate_condition_references(flow, slots),
     ], [
         *warnings,

@@ -95,6 +95,7 @@ def analyze_import(
                     "unknown_ask_slot",
                     "unknown_ask_entity",
                     "invalid_http_action",
+                    "invalid_handoff_config",
                     "invalid_slots",
                     "invalid_slot",
                     "duplicate_slot_id",

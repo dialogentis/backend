@@ -12,6 +12,7 @@ from dialogentis.datasets.routes import ValidationIssue, issue_view
 from dialogentis.dependencies import Database
 from dialogentis.flow_validation import validate_flow
 from dialogentis.organizations import organization_context
+from dialogentis.versions.handoff_dependencies import validate_handoff_dependencies
 
 router = APIRouter(prefix="/api/v1/organizations/{org_id}/agents/{agent_id}", tags=["flow"])
 
@@ -38,6 +39,10 @@ async def validate_draft_flow(
     if draft.revision != body.revision:
         raise HTTPException(409, "Черновик изменился. Обновите страницу")
     errors, warnings = await asyncio.to_thread(validate_flow, draft.configuration)
+    if not errors:
+        errors.extend(
+            await validate_handoff_dependencies(db, org_id, agent_id, draft.configuration)
+        )
     limit = 1000
     return FlowValidationView(
         revision=body.revision,

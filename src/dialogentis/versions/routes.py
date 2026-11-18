@@ -18,6 +18,7 @@ from dialogentis.nlu.intent import FallbackReason
 from dialogentis.nlu.intent_evaluation import ClassMetrics
 from dialogentis.nlu.settings import NLUSettings, QualitySettings
 from dialogentis.organizations import organization_context
+from dialogentis.slots import validate_slots
 from dialogentis.versions.models import AgentVersion
 from dialogentis.versions.prepare import TrainingInProgress, prepare_version, version_status
 
@@ -59,6 +60,14 @@ class VersionView(BaseModel):
     dataset_warnings: list[ValidationIssue]
     warnings_truncated: bool
     graph_validation: Literal["not_checked"] | None
+
+
+class HandoffSlotView(BaseModel):
+    id: UUID
+    code: str
+    name: str
+    value_type: Literal["string", "integer", "number", "boolean", "date"]
+    sensitive: bool
 
 
 class IntentSummary(BaseModel):
@@ -247,6 +256,20 @@ async def get_version(
     await organization_context(db, user, org_id)
     version, job = await _version(db, org_id, agent_id, version_id)
     return view(version, job)
+
+
+@router.get("/{version_id}/handoff-slots", response_model=list[HandoffSlotView])
+async def list_handoff_slots(
+    org_id: UUID, agent_id: UUID, version_id: UUID, user: VerifiedUser, db: Database
+):
+    await organization_context(db, user, org_id)
+    version, job = await _version(db, org_id, agent_id, version_id)
+    if version_status(version, job) != "ready":
+        raise HTTPException(409, "Версия агента ещё не готова")
+    slots, errors = validate_slots(version.snapshot["config"].get("slots", []))
+    if errors:
+        raise HTTPException(409, "Проверьте параметры версии")
+    return [HandoffSlotView.model_validate(slot, from_attributes=True) for slot in slots]
 
 
 @router.get("/{version_id}/report", response_model=ReportView)

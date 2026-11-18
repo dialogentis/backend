@@ -9,6 +9,7 @@ import pytest
 from fastapi import HTTPException
 from sqlalchemy import delete, select
 
+from dialogentis.api_errors import DomainValidationError
 from dialogentis.db import unit_of_work
 from dialogentis.http_action import HTTP_OUTPUTS
 from dialogentis.integrations.http_client import IntegrationRequestError, IntegrationResponse
@@ -24,6 +25,7 @@ from dialogentis.runtime.test_chat import TestChatService as ChatService
 from dialogentis.runtime.watchdog import recover_once
 from tests.test_auth import client_for
 from tests.test_exports import app as app
+from tests.test_runtime_handoff import call_flows
 from tests.test_versions import create_agent, populate, prepare
 
 pytestmark = [
@@ -32,6 +34,75 @@ pytestmark = [
         os.environ.get("RUN_INTEGRATION") != "1", reason="Run with Compose test profile"
     ),
 ]
+
+
+async def test_handoff_uses_ready_agent_from_same_organization_and_resumes_caller(app):
+    async with client_for(app) as owner, client_for(app) as other:
+        user_id, org_id, root_id = await create_agent(app, owner)
+        other_user, other_org, other_agent = await create_agent(app, other)
+        target_reply = await owner.post(
+            f"/api/v1/organizations/{org_id}/agents", json={"name": "Delivery", "slug": "delivery"}
+        )
+        assert target_reply.status_code == 201
+        target_id = UUID(target_reply.json()["id"])
+        root, target, _, _, call, _ = call_flows()
+
+        async def save_flow(organization_id, agent_id, config):
+            await populate(app, organization_id, agent_id)
+            async with unit_of_work(
+                app.state.session_factory, organization_id=organization_id
+            ) as db:
+                draft = await db.scalar(select(AgentDraft).where(AgentDraft.agent_id == agent_id))
+                assert draft is not None
+                draft.configuration = {
+                    **draft.configuration,
+                    "slots": config["slots"],
+                    "flow": config["flow"],
+                }
+
+        await save_flow(org_id, target_id, target)
+        await save_flow(other_org, other_agent, target)
+        foreign = (await prepare(app, other_user, other_org, other_agent, 1, "foreign")).version
+        await process_job(
+            app.state.session_factory, foreign.job_id, other_org, HANDLERS, "training"
+        )
+        call["config"].update(target_agent_id=str(other_agent), target_version_id=str(foreign.id))
+        await save_flow(org_id, root_id, root)
+        with pytest.raises(DomainValidationError):
+            await prepare(app, user_id, org_id, root_id, 1, "root")
+
+        delivery = (await prepare(app, user_id, org_id, target_id, 1, "delivery")).version
+        call["config"].update(target_agent_id=str(target_id), target_version_id=str(delivery.id))
+        await save_flow(org_id, root_id, root)
+        with pytest.raises(DomainValidationError):
+            await prepare(app, user_id, org_id, root_id, 1, "root")
+        await process_job(app.state.session_factory, delivery.job_id, org_id, HANDLERS, "training")
+        versions_url = f"/api/v1/organizations/{org_id}/agents/{target_id}/versions"
+        slots_path = f"{versions_url}/{delivery.id}/handoff-slots"
+        definitions = await owner.get(slots_path)
+        assert definitions.status_code == 200
+        assert {slot["code"] for slot in definitions.json()} == {"ticket", "answer", "preserved"}
+        assert all("default" not in slot for slot in definitions.json())
+        assert (await other.get(slots_path)).status_code == 404
+        version = (await prepare(app, user_id, org_id, root_id, 1, "root")).version
+        await process_job(app.state.session_factory, version.job_id, org_id, HANDLERS, "training")
+        service = app.state.test_chat_service
+        started = await service.start(user_id, org_id, root_id, version.id)
+        assert started.status == "waiting_input" and started.messages == ("Где заказ 321?",)
+        assert any(event.output == str(delivery.id) for event in started.trace)
+        assert started.credential is not None
+        result = await service.send(
+            user_id,
+            org_id,
+            started.conversation_id,
+            1,
+            "Завтра",
+            started.credential,
+            uuid4(),
+            "answer",
+        )
+        assert result.status == "completed" and result.messages == ("Доставка: Завтра / важно",)
+        assert any(event.event == "returned" for event in result.trace)
 
 
 async def test_mock_and_live_http_actions_use_organization_policy(app, monkeypatch):

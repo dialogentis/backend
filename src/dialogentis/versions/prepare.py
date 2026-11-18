@@ -21,6 +21,7 @@ from dialogentis.jobs.enqueue import enqueue
 from dialogentis.jobs.models import Job
 from dialogentis.models import User
 from dialogentis.organizations import audit, organization_context
+from dialogentis.versions.handoff_dependencies import validate_handoff_dependencies
 from dialogentis.versions.models import AgentVersion
 
 
@@ -128,6 +129,8 @@ async def prepare_version(
     if len(encoded) > 10 * 1024 * 1024:
         raise HTTPException(413, "Черновик превышает 10 МиБ")
     errors, warnings = await asyncio.to_thread(validate_configuration, config)
+    if not errors and any(node["type"] == "handoff" for node in config["flow"]["nodes"]):
+        errors.extend(await validate_handoff_dependencies(db, org_id, agent_id, config))
     if errors:
         raise DomainValidationError([issue_view(item).model_dump() for item in errors[:1000]])
     settings = config["nlu_settings"]

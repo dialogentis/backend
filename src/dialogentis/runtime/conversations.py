@@ -52,7 +52,11 @@ async def _now(db: AsyncSession) -> datetime:
 
 def _check_terminal(state: RuntimeState) -> None:
     if state.status != "waiting_input" and (
-        state.slot_values or state.attempts or state.pending_ask
+        state.slot_values
+        or state.attempts
+        or state.pending_ask
+        or state.active_path
+        or state.callers
     ):
         raise ValueError("Terminal state must not contain runtime values")
 

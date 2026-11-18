@@ -87,6 +87,8 @@ async def reserve_initial_turn(
         or initial.fallback_count != 0
         or initial.pending_ask is not None
         or initial.attempts
+        or initial.active_path
+        or initial.callers
     ):
         raise ValueError("Invalid initial state")
     key = idempotency_key if idempotency_key is not None else uuid4().hex
