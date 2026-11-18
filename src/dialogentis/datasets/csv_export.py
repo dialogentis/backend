@@ -1,15 +1,16 @@
 import csv
 import io
 import json
+import re
+from unicodedata import normalize
 
 from dialogentis.datasets.csv_import import MAX_FILE_BYTES
 from dialogentis.datasets.schema import Dataset
 
 
 def safe_cell(value: str) -> str:
-    if value.startswith(("\t", "\r", "\n")) or value.lstrip(" \t\r\n").startswith(
-        ("=", "+", "-", "@")
-    ):
+    visible = re.sub(r"^[\s\ufeff]+", "", normalize("NFKC", value))
+    if value.startswith(("\t", "\r", "\n")) or visible.startswith(("=", "+", "-", "@")):
         return "'" + value
     return value
 

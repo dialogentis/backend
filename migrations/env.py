@@ -11,6 +11,7 @@ import dialogentis.integrations.ledger_models  # noqa: F401 - register action ex
 import dialogentis.integrations.models  # noqa: F401 - register integration tables
 import dialogentis.jobs.models  # noqa: F401 - register job tables
 import dialogentis.organizations  # noqa: F401 - register organization tables
+import dialogentis.runtime.history_export_models  # noqa: F401 - register history exports
 import dialogentis.runtime.history_models  # noqa: F401 - register conversation history
 import dialogentis.runtime.models  # noqa: F401 - register conversation tables
 import dialogentis.runtime.rate_limits  # noqa: F401 - register rate buckets

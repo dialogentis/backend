@@ -16,6 +16,7 @@ from dialogentis.jobs.lifecycle import Apply, Claim, RetryableJobError
 from dialogentis.jobs.models import Job, OutboxEvent
 from dialogentis.models import Agent, AgentDraft, Membership, Organization
 from dialogentis.organizations import AuditEvent, Invitation, OrganizationDeletion
+from dialogentis.runtime.history_export_models import HistoryExportTask
 from dialogentis.runtime.models import TestConversation
 from dialogentis.versions.models import AgentVersion
 from dialogentis.versions.release_models import Release
@@ -46,6 +47,9 @@ async def purge_tenant(
         raise RetryableJobError("Artifact storage is unavailable") from exc
     keep_job_id = record.job_id if record is not None else None
     await db.execute(delete(ExportTask).where(ExportTask.organization_id == organization_id))
+    await db.execute(
+        delete(HistoryExportTask).where(HistoryExportTask.organization_id == organization_id)
+    )
     await db.execute(delete(ImportTask).where(ImportTask.organization_id == organization_id))
     await db.execute(
         delete(TestConversation).where(TestConversation.organization_id == organization_id)

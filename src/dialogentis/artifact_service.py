@@ -16,6 +16,7 @@ from dialogentis.datasets.export_models import ExportTask
 from dialogentis.datasets.import_models import ImportTask
 from dialogentis.jobs.models import Job
 from dialogentis.models import Organization
+from dialogentis.runtime.history_export_models import HistoryExportTask
 
 
 class ArtifactUnavailable(ValueError):
@@ -193,13 +194,12 @@ async def cleanup_expired(db: AsyncSession, storage: ArtifactStorage, organizati
         )
     ).all()
     for artifact in expired:
-        await db.execute(
-            update(ExportTask)
-            .where(
-                ExportTask.organization_id == organization_id, ExportTask.artifact_id == artifact.id
+        for task in (ExportTask, HistoryExportTask):
+            await db.execute(
+                update(task)
+                .where(task.organization_id == organization_id, task.artifact_id == artifact.id)
+                .values(artifact_id=None)
             )
-            .values(artifact_id=None)
-        )
         await db.execute(
             update(ImportTask)
             .where(
