@@ -27,6 +27,7 @@ from dialogentis.jobs.lifecycle import (
     heartbeat,
 )
 from dialogentis.models import Organization
+from dialogentis.runtime.history_deletion import prepare_history_deletion
 from dialogentis.runtime.history_export import prepare_history_export
 
 HEARTBEAT_INTERVAL = 10
@@ -47,6 +48,7 @@ HANDLERS: dict[str, Handler] = {
     "dataset.export": Handler(prepare_export, timeout_seconds=120, retryable=True),
     "dataset.import": Handler(prepare_import, timeout_seconds=120, retryable=True),
     "history.export": Handler(prepare_history_export, timeout_seconds=120, retryable=True),
+    "history.deletion": Handler(prepare_history_deletion, timeout_seconds=120, retryable=True),
 }
 
 

@@ -25,6 +25,7 @@ from dialogentis.runtime.cleanup import (
     recover_abandoned_turns,
 )
 from dialogentis.runtime.history import cleanup_history
+from dialogentis.runtime.history_deletion import scrub_history_deletions
 from dialogentis.runtime.history_models import ConversationHistory
 from dialogentis.runtime.models import TestConversation
 from dialogentis.runtime.receipt_models import RuntimeReceipt
@@ -63,6 +64,7 @@ async def reconcile_once(
             async with unit_of_work(factory, organization_id=organization_id) as db:
                 await scrub_exports(db, organization_id)
                 await scrub_imports(db, organization_id)
+                await scrub_history_deletions(db, organization_id)
         for organization_id in conversation_organizations:
             for _ in range(10):
                 async with unit_of_work(factory, organization_id=organization_id) as db:

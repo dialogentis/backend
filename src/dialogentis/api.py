@@ -31,6 +31,7 @@ from dialogentis.flow_routes import router as flow_router
 from dialogentis.integrations.routes import router as integrations_router
 from dialogentis.organizations import router as organizations_router
 from dialogentis.runtime.executor import RuntimeExecutor
+from dialogentis.runtime.history_deletion_routes import router as history_deletions_router
 from dialogentis.runtime.history_export_routes import router as history_exports_router
 from dialogentis.runtime.history_routes import router as history_router
 from dialogentis.runtime.public_routes import router as public_runtime_router
@@ -94,6 +95,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(test_chat_router)
     app.include_router(history_router)
     app.include_router(history_exports_router)
+    app.include_router(history_deletions_router)
     app.include_router(public_runtime_router)
 
     @app.middleware("http")
