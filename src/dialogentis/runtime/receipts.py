@@ -52,6 +52,28 @@ def _key(settings: Settings, purpose: bytes) -> bytes:
     return hmac.digest(secret, b"dialogentis:runtime:receipt:" + purpose + b":v1", "sha256")
 
 
+def start_identity(
+    settings: Settings, organization_id: UUID, user_id: UUID, agent_id: UUID, key: str
+) -> tuple[UUID, UUID, str]:
+    if (
+        not isinstance(key, str)
+        or not 1 <= len(key) <= 128
+        or any(not 33 <= ord(char) <= 126 for char in key)
+    ):
+        raise ReceiptError("invalid_idempotency_key")
+    payload = organization_id.bytes + user_id.bytes + agent_id.bytes + key.encode("ascii")
+    conversation = UUID(
+        bytes=hashlib.sha256(b"dialogentis:start:conversation:v1" + payload).digest()[:16]
+    )
+    message = UUID(bytes=hashlib.sha256(b"dialogentis:start:message:v1" + payload).digest()[:16])
+    token = (
+        base64.urlsafe_b64encode(hmac.digest(_key(settings, b"start-token"), payload, "sha256"))
+        .rstrip(b"=")
+        .decode("ascii")
+    )
+    return conversation, message, token
+
+
 def request_fingerprint(
     settings: Settings,
     organization_id: UUID,

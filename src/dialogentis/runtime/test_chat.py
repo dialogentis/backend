@@ -1,7 +1,9 @@
 """Internal orchestration of idempotent test-chat turns."""
 
 import asyncio
+from collections.abc import Coroutine
 from dataclasses import dataclass, field
+from typing import Any
 from uuid import UUID
 
 from fastapi import HTTPException
@@ -20,10 +22,16 @@ from dialogentis.jobs.models import Job
 from dialogentis.models import User
 from dialogentis.nlu.model_store import ModelIdentity
 from dialogentis.organizations import organization_context
-from dialogentis.runtime.conversations import create_conversation
-from dialogentis.runtime.core import RuntimeResult, TraceEvent
+from dialogentis.runtime.core import Prediction, RuntimeEngine, RuntimeResult, TraceEvent
 from dialogentis.runtime.executor import ExecutionError, RuntimeExecutor
-from dialogentis.runtime.idempotency import Replay, complete_message, reserve_message
+from dialogentis.runtime.idempotency import (
+    Replay,
+    ReplayedStart,
+    complete_initial_turn,
+    complete_message,
+    reserve_initial_turn,
+    reserve_message,
+)
 from dialogentis.runtime.limits import run_limited
 from dialogentis.runtime.models import TestConversation
 from dialogentis.slots import validate_slots
@@ -218,36 +226,91 @@ class TestChatService:
         )
 
     async def start(
-        self, user_id: UUID, org_id: UUID, agent_id: UUID, version_id: UUID
+        self,
+        user_id: UUID,
+        org_id: UUID,
+        agent_id: UUID,
+        version_id: UUID,
+        *,
+        idempotency_key: str | None = None,
     ) -> ChatResponse:
-        if self._closing:
-            raise HTTPException(503, "Тестовый чат завершает работу")
-        try:
-            async with asyncio.timeout(25):
-                result = await self._execute("start", user_id, org_id, agent_id, version_id)
+        return await self._run_detached(
+            self._start(user_id, org_id, agent_id, version_id, idempotency_key)
+        )
+
+    async def _start(
+        self,
+        user_id: UUID,
+        org_id: UUID,
+        agent_id: UUID,
+        version_id: UUID,
+        idempotency_key: str | None,
+    ) -> ChatResponse:
+        async def work() -> ChatResponse:
+            async with unit_of_work(self.factory, organization_id=org_id, user_id=user_id) as db:
+                user = await self._user(db, user_id)
+                bundle = await self._bundle(db, user, org_id, agent_id, version_id)
+                initial = await asyncio.to_thread(
+                    lambda: RuntimeEngine(
+                        version_id,
+                        bundle.snapshot["config"],
+                        lambda _: Prediction(version_id, None),
+                    ).initial_state()
+                )
+                reserved = await reserve_initial_turn(
+                    db,
+                    user,
+                    org_id,
+                    agent_id,
+                    version_id,
+                    initial,
+                    self.settings,
+                    idempotency_key=idempotency_key,
+                )
+            replayed = isinstance(reserved, ReplayedStart)
+            if isinstance(reserved, ReplayedStart):
+                saved = reserved.result
+            else:
+                result = await self._execute_in_slot("start", bundle)
                 async with unit_of_work(
                     self.factory, organization_id=org_id, user_id=user_id
                 ) as db:
-                    saved = await create_conversation(
-                        db,
-                        await self._user(db, user_id),
-                        org_id,
-                        agent_id,
-                        version_id,
-                        result.state,
-                        self.settings,
+                    saved = await complete_initial_turn(
+                        db, await self._user(db, user_id), org_id, reserved, result, self.settings
                     )
-                return ChatResponse(
-                    saved.id,
-                    saved.revision,
-                    result.state.status,
-                    result.messages,
-                    result.trace,
-                    result.error_code,
-                    saved.credential,
-                )
+            return ChatResponse(
+                reserved.conversation_id,
+                saved.revision,
+                saved.status,
+                saved.messages,
+                saved.trace,
+                saved.error_code,
+                reserved.credential,
+                saved.turn_id,
+                replayed=replayed,
+                replay_available=saved.replay_available,
+            )
+
+        try:
+            async with asyncio.timeout(20):
+                return await run_limited(self.factory, work)
         except TimeoutError:
             raise ExecutionError("runtime_request_timeout") from None
+
+    async def _run_detached(self, operation: Coroutine[Any, Any, ChatResponse]) -> ChatResponse:
+        if self._closing:
+            operation.close()
+            raise HTTPException(503, "Тестовый чат завершает работу")
+        task = asyncio.create_task(operation)
+        self._pending.add(task)
+
+        def finished(completed: asyncio.Task[ChatResponse]) -> None:
+            self._pending.discard(completed)
+            if not completed.cancelled():
+                completed.exception()
+
+        task.add_done_callback(finished)
+        return await asyncio.shield(task)
 
     async def send(
         self,
@@ -260,9 +323,7 @@ class TestChatService:
         message_id: UUID,
         idempotency_key: str,
     ) -> ChatResponse:
-        if self._closing:
-            raise HTTPException(503, "Тестовый чат завершает работу")
-        task = asyncio.create_task(
+        return await self._run_detached(
             self._send(
                 user_id,
                 org_id,
@@ -274,15 +335,6 @@ class TestChatService:
                 idempotency_key,
             )
         )
-        self._pending.add(task)
-
-        def finished(completed: asyncio.Task[ChatResponse]) -> None:
-            self._pending.discard(completed)
-            if not completed.cancelled():
-                completed.exception()
-
-        task.add_done_callback(finished)
-        return await asyncio.shield(task)
 
     async def _send(
         self,

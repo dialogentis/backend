@@ -69,6 +69,9 @@ async def create_conversation(
     version_id: UUID,
     state: RuntimeState,
     settings: Settings,
+    *,
+    conversation_id: UUID | None = None,
+    credential: str | None = None,
 ) -> ConversationSnapshot:
     await _access(db, user, organization_id)
     version_and_job = (
@@ -91,9 +94,13 @@ async def create_conversation(
     if state.version_id != version_id or state.turn != 0:
         raise ValueError("Invalid initial runtime state")
     now = await _now(db)
-    credential = secrets.token_urlsafe(32)
+    if (conversation_id is None) != (credential is None):
+        raise ValueError("Invalid conversation identity")
+    if credential is not None and re.fullmatch(r"[A-Za-z0-9_-]{43}", credential) is None:
+        raise ValueError("Invalid conversation identity")
+    credential = credential or secrets.token_urlsafe(32)
     row = TestConversation(
-        id=uuid4(),
+        id=conversation_id or uuid4(),
         organization_id=organization_id,
         agent_id=agent_id,
         version_id=version_id,

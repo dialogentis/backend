@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from dialogentis.config import Settings
 from dialogentis.integrations.ledger_models import ActionExecution
 from dialogentis.models import Organization, User
+from dialogentis.organizations import organization_context
 from dialogentis.runtime.checkpoint import decrypt_checkpoint, encrypt_checkpoint
 from dialogentis.runtime.conversations import (
     TurnReservation,
@@ -23,6 +24,7 @@ from dialogentis.runtime.conversations import (
     reserve_turn,
 )
 from dialogentis.runtime.core import RuntimeResult, RuntimeState, TraceEvent
+from dialogentis.runtime.models import TestConversation
 from dialogentis.runtime.receipt_models import RuntimeReceipt
 from dialogentis.runtime.receipts import (
     ReceiptIdentity,
@@ -30,6 +32,7 @@ from dialogentis.runtime.receipts import (
     open_receipt,
     request_fingerprint,
     seal_receipt,
+    start_identity,
 )
 
 
@@ -57,6 +60,13 @@ class ReservedStart:
     turn: ReservedMessage = field(repr=False)
 
 
+@dataclass(frozen=True)
+class ReplayedStart:
+    conversation_id: UUID
+    credential: str = field(repr=False)
+    result: Replay = field(repr=False)
+
+
 async def reserve_initial_turn(
     db: AsyncSession,
     user: User,
@@ -65,7 +75,9 @@ async def reserve_initial_turn(
     version_id: UUID,
     initial: RuntimeState,
     settings: Settings,
-) -> ReservedStart:
+    *,
+    idempotency_key: str | None = None,
+) -> ReservedStart | ReplayedStart:
     """Reserve a private initial turn; a caller must commit before executing it."""
     if (
         initial.version_id != version_id
@@ -76,8 +88,51 @@ async def reserve_initial_turn(
         or initial.attempts
     ):
         raise ValueError("Invalid initial state")
+    key = idempotency_key if idempotency_key is not None else uuid4().hex
+    conversation_id, message_id, credential = start_identity(
+        settings, organization_id, user.id, agent_id, key
+    )
+    await organization_context(db, user, organization_id, lock=True)
+    row = await db.get(TestConversation, conversation_id)
+    receipt = await db.scalar(
+        select(RuntimeReceipt.id).where(
+            RuntimeReceipt.organization_id == organization_id,
+            RuntimeReceipt.conversation_id == conversation_id,
+            RuntimeReceipt.client_message_id == message_id,
+        )
+    )
+    if row is not None:
+        if row.agent_id != agent_id or row.created_by != user.id or row.version_id != version_id:
+            raise HTTPException(409, "Ключ уже использован для другого диалога")
+        if row.revision != 1 or receipt is None:
+            raise HTTPException(409, "Диалог изменился или результат запуска недоступен")
+        replay = await reserve_message(
+            db,
+            user,
+            organization_id,
+            conversation_id,
+            credential,
+            1,
+            message_id,
+            key,
+            f"initial-turn:{version_id}",
+            settings,
+        )
+        if not isinstance(replay, Replay):
+            raise HTTPException(409, "Результат запуска недоступен")
+        return ReplayedStart(conversation_id, credential, replay)
+    if receipt is not None:
+        raise HTTPException(409, "Срок диалога истёк; используйте новый ключ")
     created = await create_conversation(
-        db, user, organization_id, agent_id, version_id, initial, settings
+        db,
+        user,
+        organization_id,
+        agent_id,
+        version_id,
+        initial,
+        settings,
+        conversation_id=conversation_id,
+        credential=credential,
     )
     assert created.credential is not None
     turn = await reserve_message(
@@ -87,9 +142,9 @@ async def reserve_initial_turn(
         created.id,
         created.credential,
         created.revision,
-        uuid4(),
-        uuid4().hex,
-        "initial-turn",
+        message_id,
+        key,
+        f"initial-turn:{version_id}",
         settings,
     )
     assert isinstance(turn, ReservedMessage)

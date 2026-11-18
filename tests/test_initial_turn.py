@@ -17,6 +17,7 @@ from dialogentis.models import Organization, User
 from dialogentis.runtime.cleanup import recover_abandoned_turns
 from dialogentis.runtime.core import Prediction, RuntimeEngine
 from dialogentis.runtime.idempotency import (
+    ReplayedStart,
     ReservedMessage,
     complete_initial_turn,
     reserve_initial_turn,
@@ -70,9 +71,32 @@ async def test_initial_turn_is_fenced_and_recovers_actions(app):
             user = await db.get(User, user_id)
             assert user is not None
             reserved = await reserve_initial_turn(
-                db, user, org_id, agent_id, version.id, initial, app.state.settings
+                db,
+                user,
+                org_id,
+                agent_id,
+                version.id,
+                initial,
+                app.state.settings,
+                idempotency_key="stable-start",
             )
+            assert not isinstance(reserved, ReplayedStart)
             assert reserved.credential not in repr(reserved)
+        async with unit_of_work(app.state.session_factory, organization_id=org_id) as db:
+            user = await db.get(User, user_id)
+            assert user is not None
+            with pytest.raises(HTTPException) as pending:
+                await reserve_initial_turn(
+                    db,
+                    user,
+                    org_id,
+                    agent_id,
+                    version.id,
+                    initial,
+                    app.state.settings,
+                    idempotency_key="stable-start",
+                )
+            assert pending.value.status_code == 409
         async with unit_of_work(app.state.session_factory, organization_id=org_id) as db:
             user = await db.get(User, user_id)
             assert user is not None
@@ -105,6 +129,36 @@ async def test_initial_turn_is_fenced_and_recovers_actions(app):
         async with unit_of_work(app.state.session_factory, organization_id=org_id) as db:
             user = await db.get(User, user_id)
             assert user is not None
+            replay = await reserve_initial_turn(
+                db,
+                user,
+                org_id,
+                agent_id,
+                version.id,
+                initial,
+                app.state.settings,
+                idempotency_key="stable-start",
+            )
+            assert isinstance(replay, ReplayedStart)
+            assert replay.conversation_id == reserved.conversation_id
+            assert replay.credential == reserved.credential and replay.result.replay_available
+            assert replay.result.messages == result.messages
+            different = uuid4()
+            with pytest.raises(HTTPException) as conflict:
+                await reserve_initial_turn(
+                    db,
+                    user,
+                    org_id,
+                    agent_id,
+                    different,
+                    initial.model_copy(update={"version_id": different}),
+                    app.state.settings,
+                    idempotency_key="stable-start",
+                )
+            assert conflict.value.status_code == 409
+        async with unit_of_work(app.state.session_factory, organization_id=org_id) as db:
+            user = await db.get(User, user_id)
+            assert user is not None
             following = await reserve_message(
                 db,
                 user,
@@ -125,6 +179,7 @@ async def test_initial_turn_is_fenced_and_recovers_actions(app):
             crashed = await reserve_initial_turn(
                 db, user, org_id, agent_id, version.id, initial, app.state.settings
             )
+            assert not isinstance(crashed, ReplayedStart)
         async with unit_of_work(app.state.session_factory, organization_id=org_id) as db:
             user = await db.get(User, user_id)
             assert user is not None
@@ -157,8 +212,16 @@ async def test_initial_turn_is_fenced_and_recovers_actions(app):
             assert org is not None and user is not None
             org.store_message_text = False
             private_start = await reserve_initial_turn(
-                db, user, org_id, agent_id, version.id, initial, app.state.settings
+                db,
+                user,
+                org_id,
+                agent_id,
+                version.id,
+                initial,
+                app.state.settings,
+                idempotency_key="private-start",
             )
+            assert not isinstance(private_start, ReplayedStart)
         async with unit_of_work(app.state.session_factory, organization_id=org_id) as db:
             user = await db.get(User, user_id)
             assert user is not None
@@ -172,3 +235,18 @@ async def test_initial_turn_is_fenced_and_recovers_actions(app):
             )
             receipt = await db.get(RuntimeReceipt, private_start.turn.turn_id)
             assert receipt is not None and receipt.encrypted_response is None
+        async with unit_of_work(app.state.session_factory, organization_id=org_id) as db:
+            user = await db.get(User, user_id)
+            assert user is not None
+            replay = await reserve_initial_turn(
+                db,
+                user,
+                org_id,
+                agent_id,
+                version.id,
+                initial,
+                app.state.settings,
+                idempotency_key="private-start",
+            )
+            assert isinstance(replay, ReplayedStart) and not replay.result.replay_available
+            assert replay.credential == private_start.credential and not replay.result.messages

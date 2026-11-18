@@ -238,10 +238,37 @@ async def test_real_model_chat_and_revoked_access_during_execution(app, monkeypa
             await viewer.post(chat_path, json=body, headers={"X-CSRF-Token": "bad"})
         ).status_code == 403
         assert (await viewer.post(chat_path, json={**body, "http_mode": "live"})).status_code == 422
-        created = await viewer.post(chat_path, json=body)
+        start_headers = {"Idempotency-Key": "http-start"}
+        http_ready, http_release = asyncio.Event(), asyncio.Event()
+        api_executor = app.state.test_chat_service.executor
+        execute_http = api_executor.execute
+
+        async def pause_start(**kwargs):
+            http_ready.set()
+            await http_release.wait()
+            return await execute_http(**kwargs)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(api_executor, "execute", pause_start)
+            start_task = asyncio.create_task(
+                viewer.post(chat_path, json=body, headers=start_headers)
+            )
+            try:
+                await asyncio.wait_for(http_ready.wait(), 10)
+                in_progress = await asyncio.wait_for(
+                    viewer.post(chat_path, json=body, headers=start_headers), 3
+                )
+                assert in_progress.status_code == 409
+                assert in_progress.headers["Retry-After"] == "1"
+            finally:
+                http_release.set()
+                created = await start_task
         assert created.status_code == 201, created.text
         chat = created.json()
         assert chat["status"] == "waiting_input" and chat["revision"] == 1
+        replay_start = await viewer.post(chat_path, json=body, headers=start_headers)
+        assert replay_start.status_code == 201
+        assert replay_start.json() == {**chat, "replayed": True}
         message_path = f"{base}/test-conversations/{chat['conversation_id']}/messages"
         headers = {
             "X-Conversation-Token": chat["conversation_token"],

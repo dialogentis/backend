@@ -97,10 +97,20 @@ def invalid_flow_response(request: Request, exc: InvalidVersionFlow):
 
 @router.post("/agents/{agent_id}/test-conversations", response_model=StartedChat, status_code=201)
 async def start_chat(
-    org_id: UUID, agent_id: UUID, body: StartInput, request: Request, user_id: ChatUser
+    org_id: UUID,
+    agent_id: UUID,
+    body: StartInput,
+    request: Request,
+    user_id: ChatUser,
+    key: Annotated[
+        str | None,
+        Header(alias="Idempotency-Key", min_length=1, max_length=128, pattern=r"^[!-~]+$"),
+    ] = None,
 ):
     try:
-        result = await service(request).start(user_id, org_id, agent_id, body.version_id)
+        result = await service(request).start(
+            user_id, org_id, agent_id, body.version_id, idempotency_key=key
+        )
     except InvalidVersionFlow as exc:
         return invalid_flow_response(request, exc)
     except ExecutionError:
