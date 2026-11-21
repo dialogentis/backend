@@ -7,6 +7,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from taskiq import Context, TaskiqDepends, TaskiqScheduler
 from taskiq.schedule_sources import LabelScheduleSource
 
+from dialogentis.analytics import cleanup_metrics
+from dialogentis.analytics_models import MetricHour
 from dialogentis.artifact_records import Artifact
 from dialogentis.artifact_service import ArtifactUnavailable, cleanup_expired, cleanup_orphans
 from dialogentis.artifacts import ArtifactStorage
@@ -57,6 +59,9 @@ async def reconcile_once(
             artifact_organizations = (
                 await db.scalars(select(Artifact.organization_id).distinct())
             ).all()
+            metric_organizations = (
+                await db.scalars(select(MetricHour.organization_id).distinct())
+            ).all()
         for organization_id in organizations:
             for _ in range(10):
                 if await recover_tenant(factory, organization_id, retryable_kinds) < 100:
@@ -87,6 +92,9 @@ async def reconcile_once(
                 organization = await db.get(Organization, organization_id, with_for_update=True)
                 if organization is not None:
                     await cleanup_history(db, organization)
+        for organization_id in metric_organizations:
+            async with unit_of_work(factory, organization_id=organization_id) as db:
+                await cleanup_metrics(db, organization_id, window)
         storage = ArtifactStorage(get_settings().artifact_root)
         filesystem_organizations = await asyncio.to_thread(storage.organizations)
         for organization_id in set(artifact_organizations) | set(filesystem_organizations):

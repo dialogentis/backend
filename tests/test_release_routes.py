@@ -7,6 +7,7 @@ import pytest
 from sqlalchemy import delete, select
 from sqlalchemy.exc import DBAPIError
 
+from dialogentis.analytics_models import MetricHour
 from dialogentis.db import unit_of_work
 from dialogentis.deletion_worker import purge_tenant
 from dialogentis.jobs.tasks import process_job
@@ -332,6 +333,25 @@ async def test_release_gates_atomic_publication_pins_and_rollback(app):
             str(first_version),
             str(target_version),
         }
+        async with unit_of_work(app.state.session_factory, organization_id=org_id) as db:
+            counters = (
+                await db.scalars(
+                    select(MetricHour).where(
+                        MetricHour.channel.in_(("api", "widget")),
+                        MetricHour.metric.in_(("dialogues", "messages")),
+                    )
+                )
+            ).all()
+            totals = {}
+            for row in counters:
+                key = (row.channel, row.metric)
+                totals[key] = totals.get(key, 0) + row.count
+            assert totals == {
+                ("api", "dialogues"): 2,
+                ("api", "messages"): 1,
+                ("widget", "dialogues"): 1,
+                ("widget", "messages"): 1,
+            }
         async with unit_of_work(app.state.session_factory, organization_id=other_org) as db:
             assert (
                 await db.get(ConversationHistory, (org_id, UUID(widget_chat["conversation_id"])))

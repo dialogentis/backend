@@ -12,6 +12,7 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException
 
 from dialogentis.agents import router as agents_router
+from dialogentis.analytics_routes import router as analytics_router
 from dialogentis.api_errors import DomainValidationError, error_response
 from dialogentis.auth.routes import router as auth_router
 from dialogentis.auth.security import COOKIE
@@ -96,6 +97,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(history_router)
     app.include_router(history_exports_router)
     app.include_router(history_deletions_router)
+    app.include_router(analytics_router)
     app.include_router(public_runtime_router)
 
     @app.middleware("http")

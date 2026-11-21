@@ -9,6 +9,7 @@ from fastapi import HTTPException
 from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from dialogentis.analytics import record_accepted, record_completed
 from dialogentis.channels.api_access import ApiAccess
 from dialogentis.channels.widget_access import WidgetAccess
 from dialogentis.config import Settings
@@ -169,6 +170,7 @@ async def reserve_initial_turn(
         key,
         f"initial-turn:{version_id}",
         settings,
+        initial=True,
     )
     assert isinstance(turn, ReservedMessage)
     return ReservedStart(created.id, created.credential, turn)
@@ -276,6 +278,8 @@ async def reserve_message(
     idempotency_key: str,
     text: str,
     settings: Settings,
+    *,
+    initial: bool = False,
 ) -> ReservedMessage | Replay:
     if not isinstance(message_id, UUID):
         raise ValueError("Invalid message ID")
@@ -357,9 +361,11 @@ async def reserve_message(
             key_version=settings.encryption_key_version,
             processing_token=reservation.token,
             status="processing",
+            created_at=now,
             expires_at=row.absolute_expires_at + timedelta(hours=24),
         )
     )
+    await record_accepted(db, row, turn_id, now, kind="dialogues" if initial else "messages")
     await db.flush()
     return ReservedMessage(turn_id, reservation)
 
@@ -373,6 +379,8 @@ async def complete_message(
     reserved: ReservedMessage,
     result: RuntimeResult,
     settings: Settings,
+    *,
+    external_http_ms: int = 0,
 ) -> Replay:
     row, now = await _locked_row(db, user, organization_id, conversation_id, credential)
     item = await db.scalar(
@@ -417,6 +425,7 @@ async def complete_message(
     org = await db.get(Organization, organization_id)
     assert org is not None
     payload = await record_history(db, org, row, item.id, now, result, settings)
+    await record_completed(db, row, item.id, item.created_at, now, result, external_http_ms)
     if org.store_message_text:
         item.encrypted_response = seal_receipt(
             payload, ReceiptIdentity(organization_id, conversation_id, item.id), settings

@@ -103,6 +103,13 @@ class TraceEvent:
     version_id: UUID | None = None
 
 
+class NLUObservation(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    version_id: UUID
+    intent_id: UUID | None = None
+
+
 @dataclass(frozen=True)
 class RuntimeResult:
     state: RuntimeState
@@ -111,6 +118,7 @@ class RuntimeResult:
     error_code: str | None = None
     history_input: str | None = field(default=None, repr=False)
     history_messages: tuple[str, ...] | None = field(default=None, repr=False)
+    nlu_observations: tuple[NLUObservation, ...] = ()
 
 
 def semantic_hash(
@@ -356,6 +364,7 @@ class RuntimeEngine:
     ) -> RuntimeResult:
         messages: list[str] = []
         trace: list[TraceEvent] = []
+        nlu_observations: list[NLUObservation] = []
         transitions = 0
         http_actions = 0
         deadline = monotonic() + MAX_SECONDS
@@ -408,6 +417,7 @@ class RuntimeEngine:
                 if turn == 0 or initial_input is None or status == "failed"
                 else (MASKED if private_input else redact(initial_input)),
                 tuple(redact(message) for message in messages),
+                tuple(nlu_observations),
             )
 
         initial_input = text
@@ -464,6 +474,7 @@ class RuntimeEngine:
                     else HistoryContext()
                 )
             try:
+                nlu_observations.append(NLUObservation(version_id=active._version))
                 prediction = active._predict(RuntimeInput(message, active_history))
             except Exception:
                 raise RuntimeFault("nlu_error") from None
@@ -484,6 +495,10 @@ class RuntimeEngine:
                 or any(not isinstance(entity, EntityValue) for entity in prediction.entities)
             ):
                 raise RuntimeFault("invalid_nlu_result")
+            if isinstance(prediction.intent_id, UUID) and prediction.intent_id in active._enabled:
+                nlu_observations[-1] = NLUObservation(
+                    version_id=active._version, intent_id=prediction.intent_id
+                )
             return prediction
 
         def entity_value(

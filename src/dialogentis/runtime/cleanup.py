@@ -3,9 +3,10 @@
 from datetime import timedelta
 from uuid import UUID
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import ColumnElement, delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from dialogentis.analytics import record_completed
 from dialogentis.integrations.ledger_models import ActionExecution
 from dialogentis.models import Organization
 from dialogentis.runtime.history_models import ConversationHistory
@@ -13,22 +14,46 @@ from dialogentis.runtime.models import TestConversation
 from dialogentis.runtime.receipt_models import RuntimeReceipt
 
 
+async def _lock_due_organization(
+    db: AsyncSession, organization_id: UUID, due: ColumnElement[bool]
+) -> bool:
+    return (
+        await db.scalar(
+            select(Organization.id)
+            .where(
+                Organization.id == organization_id,
+                Organization.deletion_requested_at.is_(None),
+                select(TestConversation.id)
+                .where(TestConversation.organization_id == organization_id, due)
+                .exists(),
+            )
+            .with_for_update()
+        )
+        is not None
+    )
+
+
 async def cleanup_expired_conversations(db: AsyncSession, organization_id: UUID) -> int:
-    ids = (
+    due = TestConversation.idle_expires_at <= func.now()
+    if not await _lock_due_organization(db, organization_id, due):
+        return 0
+    rows = (
         await db.scalars(
-            select(TestConversation.id)
+            select(TestConversation)
             .where(
                 TestConversation.organization_id == organization_id,
-                TestConversation.idle_expires_at <= func.now(),
+                due,
             )
             .order_by(TestConversation.idle_expires_at, TestConversation.id)
             .limit(100)
             .with_for_update(skip_locked=True)
         )
     ).all()
-    if not ids:
+    if not rows:
         return 0
-    await db.execute(
+    by_id = {row.id: row for row in rows}
+    ids = list(by_id)
+    expired = await db.execute(
         update(RuntimeReceipt)
         .where(
             RuntimeReceipt.organization_id == organization_id,
@@ -36,7 +61,11 @@ async def cleanup_expired_conversations(db: AsyncSession, organization_id: UUID)
             RuntimeReceipt.status == "processing",
         )
         .values(status="unknown")
+        .returning(RuntimeReceipt.id, RuntimeReceipt.conversation_id, RuntimeReceipt.created_at)
     )
+    for turn_id, conversation_id, accepted_at in expired.all():
+        row = by_id[conversation_id]
+        await record_completed(db, row, turn_id, accepted_at, row.idle_expires_at, None)
     await db.execute(
         update(ActionExecution)
         .where(
@@ -46,13 +75,6 @@ async def cleanup_expired_conversations(db: AsyncSession, organization_id: UUID)
         )
         .values(status="unknown_result", finished_at=func.now())
     )
-    expiry_rows = (
-        await db.execute(
-            select(TestConversation.id, TestConversation.idle_expires_at).where(
-                TestConversation.id.in_(ids), TestConversation.organization_id == organization_id
-            )
-        )
-    ).all()
     await db.execute(
         update(ConversationHistory)
         .where(
@@ -62,12 +84,13 @@ async def cleanup_expired_conversations(db: AsyncSession, organization_id: UUID)
         )
         .values(status="expired")
     )
-    for conversation_id, expired_at in expiry_rows:
+    for row in rows:
+        expired_at = row.idle_expires_at
         await db.execute(
             update(RuntimeReceipt)
             .where(
                 RuntimeReceipt.organization_id == organization_id,
-                RuntimeReceipt.conversation_id == conversation_id,
+                RuntimeReceipt.conversation_id == row.id,
                 RuntimeReceipt.expires_at > expired_at + timedelta(hours=24),
             )
             .values(expires_at=expired_at + timedelta(hours=24))
@@ -86,21 +109,25 @@ async def cleanup_expired_conversations(db: AsyncSession, organization_id: UUID)
 
 async def recover_abandoned_turns(db: AsyncSession, organization_id: UUID) -> int:
     """Fail expired reservations without replaying a possibly executed turn."""
-    ids = (
+    due = TestConversation.processing_expires_at <= func.now()
+    if not await _lock_due_organization(db, organization_id, due):
+        return 0
+    rows = (
         await db.scalars(
-            select(TestConversation.id)
+            select(TestConversation)
             .where(
                 TestConversation.organization_id == organization_id,
                 TestConversation.processing_token.is_not(None),
-                TestConversation.processing_expires_at <= func.now(),
+                due,
             )
             .order_by(TestConversation.processing_expires_at, TestConversation.id)
             .limit(100)
             .with_for_update(skip_locked=True)
         )
     ).all()
-    if not ids:
+    if not rows:
         return 0
+    ids = [row.id for row in rows]
     await db.execute(
         update(ConversationHistory)
         .where(
@@ -110,14 +137,11 @@ async def recover_abandoned_turns(db: AsyncSession, organization_id: UUID) -> in
         )
         .values(status="failed")
     )
-    for conversation_id, token in (
-        await db.execute(
-            select(TestConversation.id, TestConversation.processing_token).where(
-                TestConversation.id.in_(ids), TestConversation.organization_id == organization_id
-            )
-        )
-    ).all():
-        await db.execute(
+    for row in rows:
+        conversation_id, token = row.id, row.processing_token
+        ended_at = row.processing_expires_at
+        assert ended_at is not None
+        expired = await db.execute(
             update(RuntimeReceipt)
             .where(
                 RuntimeReceipt.organization_id == organization_id,
@@ -126,7 +150,10 @@ async def recover_abandoned_turns(db: AsyncSession, organization_id: UUID) -> in
                 RuntimeReceipt.processing_token == token,
             )
             .values(status="unknown")
+            .returning(RuntimeReceipt.id, RuntimeReceipt.created_at)
         )
+        for turn_id, accepted_at in expired.all():
+            await record_completed(db, row, turn_id, accepted_at, ended_at, None)
         await db.execute(
             update(ActionExecution)
             .where(

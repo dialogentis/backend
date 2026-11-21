@@ -3,6 +3,7 @@
 import asyncio
 import json
 from dataclasses import dataclass, field
+from time import monotonic
 from typing import cast
 from uuid import UUID
 
@@ -34,6 +35,7 @@ class LiveHttpTurn:
     reserved: ReservedMessage = field(repr=False)
     deadline: float
     ordinal: int = 0
+    external_http_seconds: float = 0
 
     async def _principal(self, db: AsyncSession):
         if isinstance(self.user_id, PublicAccess):
@@ -105,6 +107,7 @@ class LiveHttpTurn:
         updates = {}
         status = None
         remaining = self.deadline - asyncio.get_running_loop().time()
+        started = monotonic()
         try:
             if remaining <= 0:
                 raise IntegrationRequestError("timeout")
@@ -127,6 +130,8 @@ class LiveHttpTurn:
             status = response.status
         except IntegrationRequestError as exc:
             outcome = cast(Outcome, exc.code)
+        finally:
+            self.external_http_seconds += monotonic() - started
 
         async with unit_of_work(factory, organization_id=self.org_id, user_id=actor) as db:
             user = await self._principal(db)

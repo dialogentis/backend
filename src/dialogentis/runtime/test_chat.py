@@ -609,6 +609,9 @@ class TestChatService:
                         reserved,
                         result,
                         self.settings,
+                        external_http_ms=round(live_http.external_http_seconds * 1000)
+                        if live_http is not None
+                        else 0,
                     )
                 return ChatResponse(
                     conversation_id,

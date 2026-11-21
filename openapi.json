@@ -15413,6 +15413,253 @@
         }
       }
     },
+    "/api/v1/organizations/{org_id}/analytics": {
+      "get": {
+        "tags": [
+          "analytics"
+        ],
+        "summary": "Analytics Report",
+        "operationId": "analytics_report_api_v1_organizations__org_id__analytics_get",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Org Id"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "From"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "To"
+            }
+          },
+          {
+            "name": "time_zone",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 80,
+              "default": "UTC",
+              "title": "Time Zone"
+            }
+          },
+          {
+            "name": "channel",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "enum": [
+                "production",
+                "api",
+                "widget",
+                "test",
+                "all"
+              ],
+              "type": "string",
+              "default": "production",
+              "title": "Channel"
+            }
+          },
+          {
+            "name": "agent_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Agent Id"
+            }
+          },
+          {
+            "name": "intent_scope",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "enum": [
+                "root",
+                "active"
+              ],
+              "type": "string",
+              "default": "root",
+              "title": "Intent Scope"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnalyticsView"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "412": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Precondition Failed"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Content Too Large"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Content"
+          },
+          "423": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Locked"
+          },
+          "428": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Precondition Required"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Too Many Requests"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        }
+      }
+    },
     "/api/v1/runtime/agents/{agent_id}/conversations": {
       "post": {
         "tags": [
@@ -16598,6 +16845,229 @@
           "current_release_id"
         ],
         "title": "AgentView"
+      },
+      "AnalyticsIntent": {
+        "properties": {
+          "agent_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Agent Id"
+          },
+          "agent_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agent Name"
+          },
+          "intent_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Intent Id"
+          },
+          "intent_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Intent Name"
+          },
+          "count": {
+            "type": "integer",
+            "title": "Count"
+          }
+        },
+        "type": "object",
+        "required": [
+          "agent_id",
+          "agent_name",
+          "intent_id",
+          "intent_name",
+          "count"
+        ],
+        "title": "AnalyticsIntent"
+      },
+      "AnalyticsLatency": {
+        "properties": {
+          "samples": {
+            "type": "integer",
+            "title": "Samples"
+          },
+          "p50_ms": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "P50 Ms"
+          },
+          "p95_ms": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "P95 Ms"
+          }
+        },
+        "type": "object",
+        "required": [
+          "samples",
+          "p50_ms",
+          "p95_ms"
+        ],
+        "title": "AnalyticsLatency"
+      },
+      "AnalyticsPoint": {
+        "properties": {
+          "day": {
+            "type": "string",
+            "format": "date",
+            "title": "Day"
+          },
+          "dialogues": {
+            "type": "integer",
+            "title": "Dialogues",
+            "default": 0
+          },
+          "messages": {
+            "type": "integer",
+            "title": "Messages",
+            "default": 0
+          }
+        },
+        "type": "object",
+        "required": [
+          "day"
+        ],
+        "title": "AnalyticsPoint"
+      },
+      "AnalyticsRate": {
+        "properties": {
+          "count": {
+            "type": "integer",
+            "title": "Count"
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total"
+          },
+          "value": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Value"
+          }
+        },
+        "type": "object",
+        "required": [
+          "count",
+          "total",
+          "value"
+        ],
+        "title": "AnalyticsRate"
+      },
+      "AnalyticsView": {
+        "properties": {
+          "start": {
+            "type": "string",
+            "format": "date",
+            "title": "Start"
+          },
+          "end": {
+            "type": "string",
+            "format": "date",
+            "title": "End"
+          },
+          "time_zone": {
+            "type": "string",
+            "title": "Time Zone"
+          },
+          "as_of": {
+            "type": "string",
+            "format": "date-time",
+            "title": "As Of"
+          },
+          "dialogues": {
+            "type": "integer",
+            "title": "Dialogues"
+          },
+          "messages": {
+            "type": "integer",
+            "title": "Messages"
+          },
+          "fallback": {
+            "$ref": "#/components/schemas/AnalyticsRate"
+          },
+          "errors": {
+            "$ref": "#/components/schemas/AnalyticsRate"
+          },
+          "latency": {
+            "$ref": "#/components/schemas/AnalyticsLatency"
+          },
+          "internal_latency": {
+            "$ref": "#/components/schemas/AnalyticsLatency"
+          },
+          "external_http_latency": {
+            "$ref": "#/components/schemas/AnalyticsLatency"
+          },
+          "latency_method": {
+            "type": "string",
+            "const": "nearest_rank_bucket_upper_bound",
+            "title": "Latency Method",
+            "default": "nearest_rank_bucket_upper_bound"
+          },
+          "series": {
+            "items": {
+              "$ref": "#/components/schemas/AnalyticsPoint"
+            },
+            "type": "array",
+            "title": "Series"
+          },
+          "intents": {
+            "items": {
+              "$ref": "#/components/schemas/AnalyticsIntent"
+            },
+            "type": "array",
+            "title": "Intents"
+          }
+        },
+        "type": "object",
+        "required": [
+          "start",
+          "end",
+          "time_zone",
+          "as_of",
+          "dialogues",
+          "messages",
+          "fallback",
+          "errors",
+          "latency",
+          "internal_latency",
+          "external_http_latency",
+          "series",
+          "intents"
+        ],
+        "title": "AnalyticsView"
       },
       "ApiKeyInput": {
         "properties": {

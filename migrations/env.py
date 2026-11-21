@@ -1,6 +1,7 @@
 from alembic import context
 from sqlalchemy import create_engine
 
+import dialogentis.analytics_models  # noqa: F401 - register analytics tables
 import dialogentis.artifact_records  # noqa: F401 - register artifact tables
 import dialogentis.auth.models  # noqa: F401 - register auth tables for metadata comparison
 import dialogentis.channels.api_key_models  # noqa: F401 - register API keys

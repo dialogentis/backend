@@ -170,6 +170,7 @@ def main() -> None:
         "messages": result.messages,
         "history_input": result.history_input,
         "history_messages": result.history_messages,
+        "nlu_observations": [item.model_dump(mode="json") for item in result.nlu_observations],
         "trace": [asdict(event) for event in result.trace],
         "error_code": result.error_code,
     }

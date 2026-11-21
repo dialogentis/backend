@@ -17,7 +17,13 @@ from dialogentis.handoff import HandoffConfig
 from dialogentis.http_action import HTTP_OUTPUTS, HttpActionConfig, MockIntegration
 from dialogentis.nlu.model_store import ModelIdentity
 from dialogentis.runtime.child import MAX_REQUEST, MAX_RESPONSE
-from dialogentis.runtime.core import RuntimeResult, RuntimeState, TraceEvent
+from dialogentis.runtime.core import (
+    MAX_TRANSITIONS,
+    NLUObservation,
+    RuntimeResult,
+    RuntimeState,
+    TraceEvent,
+)
 from dialogentis.runtime.history_context import HistoryContext
 from dialogentis.slots import Slot, validate_slots
 from dialogentis.versions.prepare import canonical_hash
@@ -117,6 +123,7 @@ class ResultView(BaseModel):
     error_code: str | None = Field(default=None, max_length=64)
     history_input: str | None = Field(default=None, max_length=4000, repr=False)
     history_messages: tuple[str, ...] | None = Field(default=None, max_length=52, repr=False)
+    nlu_observations: tuple[NLUObservation, ...] = Field(default=(), max_length=MAX_TRANSITIONS + 1)
 
 
 class RuntimeExecutor:
@@ -400,6 +407,7 @@ class RuntimeExecutor:
                 view.error_code,
                 view.history_input,
                 view.history_messages,
+                view.nlu_observations,
             )
         except ExecutionError:
             raise
