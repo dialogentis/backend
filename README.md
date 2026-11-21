@@ -33,7 +33,7 @@ docker compose --profile dev up --build -d
 uv run --locked python scripts/init_env.py --output .env.production
 ```
 
-В `.env.production` задайте `PUBLIC_HOST` без схемы и порта, `SMTP_HOST`, `SMTP_PORT=587` и `SMTP_FROM`. Для SMTP с аутентификацией задайте одновременно `SMTP_USER` и `SMTP_PASSWORD`. Ретранслятор должен поддерживать STARTTLS. Compose формирует публичный адрес `https://PUBLIC_HOST` из имени.
+В `.env.production` задайте `PUBLIC_HOST` без схемы и порта, `SMTP_HOST`, `SMTP_PORT=587` и `SMTP_FROM`. Для SMTP с аутентификацией задайте одновременно `SMTP_USER` и `SMTP_PASSWORD`. Ретранслятор должен поддерживать STARTTLS. Compose формирует публичный адрес `https://PUBLIC_HOST` из имени. Задайте `DELETION_JOURNAL_VOLUME` с именем заранее созданного независимого тома журнала. Требования к тому, копиям и процедурам восстановления и обновления описаны в [инструкции эксплуатации](docs/OPERATIONS.md).
 
 ```sh
 docker compose --env-file .env.production -f compose.yaml -f compose.production.yaml up --build -d --wait
@@ -137,4 +137,4 @@ curl -fsS -X POST "$BASE_URL/conversations/$CONVERSATION_ID/messages" \
 docker compose --profile dev --profile test down
 ```
 
-Volumes сохраняются. При обычном обновлении сохраняйте тома базы и данных. Проверяемая процедура резервного копирования и восстановления готовится на этапе S14.
+Volumes сохраняются. При обычном обновлении сохраняйте тома базы и данных. Перед сменой версии выполните [резервное копирование](docs/OPERATIONS.md#ежедневная-копия).

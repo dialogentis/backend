@@ -1,6 +1,6 @@
 name: dialogentis
 x-app: &app
-  image: dialogentis-backend:0.1.0
+  image: ${BACKEND_IMAGE:-dialogentis-backend:0.1.0}
   build:
     context: .
     target: production
@@ -31,7 +31,7 @@ x-app: &app
 
 services:
   frontend:
-    image: dialogentis-frontend:0.1.0
+    image: ${FRONTEND_IMAGE:-dialogentis-frontend:0.1.0}
     build: ../frontend
     ports: ['127.0.0.1:18080:8080']
     networks: [internal, edge]

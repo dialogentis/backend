@@ -83,3 +83,6 @@ services:
 volumes:
   caddy-data:
   caddy-config:
+  deletion-journal:
+    external: true
+    name: ${DELETION_JOURNAL_VOLUME:?Set the existing independent deletion journal volume}
