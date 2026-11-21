@@ -4,6 +4,7 @@ import asyncio
 from collections.abc import Coroutine
 from dataclasses import dataclass, field
 from datetime import datetime
+from time import monotonic
 from typing import Any
 from uuid import UUID
 
@@ -56,6 +57,7 @@ from dialogentis.runtime.models import TestConversation
 from dialogentis.runtime.rate_limits import limit_api_turn, limit_widget_turn
 from dialogentis.runtime.receipts import start_identity
 from dialogentis.slots import validate_slots
+from dialogentis.telemetry import log_event
 from dialogentis.versions.models import AgentVersion
 from dialogentis.versions.prepare import version_status
 from dialogentis.versions.release_check import ReleasePin
@@ -374,6 +376,7 @@ class TestChatService:
         idempotency_key: str | None,
         http_mode: str,
     ) -> ChatResponse:
+        started = monotonic()
         deadline = asyncio.get_running_loop().time() + 20
 
         async def work() -> ChatResponse:
@@ -430,6 +433,9 @@ class TestChatService:
             if isinstance(reserved, ReplayedStart):
                 saved = reserved.result
             else:
+                log_event(
+                    "runtime", "turn_accepted", started=started, turn_id=reserved.turn.turn_id
+                )
                 live_http = (
                     LiveHttpTurn(org_id, user_id, reserved.credential, reserved.turn, deadline)
                     if http_mode == "live"
@@ -444,6 +450,13 @@ class TestChatService:
                     saved = await complete_initial_turn(
                         db, await self._user(db, user_id), org_id, reserved, result, self.settings
                     )
+            log_event(
+                "runtime",
+                "turn_replayed" if replayed else "turn_finished",
+                started=started,
+                turn_id=saved.turn_id,
+                error_code=saved.error_code,
+            )
             expires_at = None
             if release_id is not None:
                 async with unit_of_work(self.factory, organization_id=org_id) as db:
@@ -522,6 +535,8 @@ class TestChatService:
         message_id: UUID,
         idempotency_key: str,
     ) -> ChatResponse:
+        started = monotonic()
+        accepted_id = None
         if not isinstance(text, str) or not 1 <= len(text) <= 2000:
             raise ExecutionError("runtime_invalid_request")
         try:
@@ -553,6 +568,7 @@ class TestChatService:
                     if isinstance(user, WidgetAccess) and not isinstance(reserved, Replay):
                         await limit_widget_turn(db, user, start=False)
                 if isinstance(reserved, Replay):
+                    log_event("runtime", "turn_replayed", started=started, turn_id=reserved.turn_id)
                     return ChatResponse(
                         conversation_id,
                         reserved.revision,
@@ -564,6 +580,8 @@ class TestChatService:
                         replayed=True,
                         replay_available=reserved.replay_available,
                     )
+                accepted_id = reserved.turn_id
+                log_event("runtime", "turn_accepted", started=started, turn_id=accepted_id)
                 async with unit_of_work(
                     self.factory, organization_id=org_id, user_id=session_user(user_id)
                 ) as db:
@@ -613,6 +631,13 @@ class TestChatService:
                         if live_http is not None
                         else 0,
                     )
+                log_event(
+                    "runtime",
+                    "turn_finished",
+                    started=started,
+                    turn_id=saved.turn_id,
+                    error_code=saved.error_code,
+                )
                 return ChatResponse(
                     conversation_id,
                     saved.revision,
@@ -624,7 +649,23 @@ class TestChatService:
                     replay_available=saved.replay_available,
                 )
         except TimeoutError:
+            log_event(
+                "runtime",
+                "turn_interrupted",
+                started=started,
+                turn_id=accepted_id,
+                error_code="runtime_request_timeout",
+            )
             raise ExecutionError("runtime_request_timeout") from None
+        except ExecutionError as exc:
+            log_event(
+                "runtime",
+                "turn_interrupted",
+                started=started,
+                turn_id=accepted_id,
+                error_code=exc.code,
+            )
+            raise
 
 
 def session_user(actor: Actor) -> UUID | None:

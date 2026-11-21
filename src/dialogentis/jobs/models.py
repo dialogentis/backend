@@ -17,6 +17,8 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from dialogentis.models import Base
 
+JOB_QUEUE_NAMES = {"normal": "dialogentis.jobs", "training": "dialogentis.training"}
+
 
 class Job(Base):
     __tablename__ = "jobs"

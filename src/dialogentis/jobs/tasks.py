@@ -1,6 +1,7 @@
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
+from time import monotonic
 from typing import Literal
 from uuid import UUID
 
@@ -29,6 +30,7 @@ from dialogentis.jobs.lifecycle import (
 from dialogentis.models import Organization
 from dialogentis.runtime.history_deletion import prepare_history_deletion
 from dialogentis.runtime.history_export import prepare_history_export
+from dialogentis.telemetry import log_event
 
 HEARTBEAT_INTERVAL = 10
 
@@ -99,12 +101,22 @@ async def process_job(
     current = await claim(factory, job_id, organization_id, frozenset(handlers), queue)
     if current is None:
         return
+    started = monotonic()
+    service = "training_worker" if queue == "training" else "worker"
+    log_event(service, "job_claimed", started=started, job_id=job_id)
+
+    async def record_failure(code: str, *, retryable: bool) -> None:
+        if await fail(factory, current, error_code=code, retryable=retryable):
+            log_event(
+                service, "job_attempt_failed", started=started, job_id=job_id, error_code=code
+            )
+
     if current.kind != "organization.deletion":
         try:
             async with unit_of_work(factory, organization_id=organization_id) as db:
                 await _check_active(db, organization_id)
         except OrganizationUnavailable:
-            await fail(factory, current, error_code="organization_unavailable", retryable=False)
+            await record_failure("organization_unavailable", retryable=False)
             return
     handler = handlers[current.kind]
     prepare = asyncio.ensure_future(handler.prepare(factory, current))
@@ -122,8 +134,8 @@ async def process_job(
             if watch in done:
                 cancelled = watch.result()
                 await stop()
-                if cancelled:
-                    await complete(factory, current, _no_apply)
+                if cancelled and await complete(factory, current, _no_apply):
+                    log_event(service, "job_attempt_finished", started=started, job_id=job_id)
                 return
             apply = prepare.result()
             watch.cancel()
@@ -134,25 +146,26 @@ async def process_job(
                     await _check_active(db, current.organization_id, exclusive=True)
                 await apply(db, job)
 
-            await complete(factory, current, guarded_apply)
+            if await complete(factory, current, guarded_apply):
+                log_event(service, "job_attempt_finished", started=started, job_id=job_id)
     except TimeoutError:
         await stop()
-        await fail(factory, current, error_code="timeout", retryable=handler.retryable)
+        await record_failure("timeout", retryable=handler.retryable)
     except RetryableJobError:
         await stop()
-        await fail(factory, current, error_code="temporary_error", retryable=handler.retryable)
+        await record_failure("temporary_error", retryable=handler.retryable)
     except PermanentJobError as exc:
         await stop()
-        await fail(factory, current, error_code=exc.code, retryable=False)
+        await record_failure(exc.code, retryable=False)
     except SQLAlchemyError:
         await stop()
-        await fail(factory, current, error_code="database_error", retryable=handler.retryable)
+        await record_failure("database_error", retryable=handler.retryable)
     except OrganizationUnavailable:
         await stop()
-        await fail(factory, current, error_code="organization_unavailable", retryable=False)
+        await record_failure("organization_unavailable", retryable=False)
     except Exception:
         await stop()
-        await fail(factory, current, error_code="handler_error", retryable=False)
+        await record_failure("handler_error", retryable=False)
     finally:
         await stop()
 

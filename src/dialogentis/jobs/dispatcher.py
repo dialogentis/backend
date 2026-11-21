@@ -3,6 +3,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
+from time import monotonic
 from uuid import UUID
 
 from sqlalchemy import select
@@ -10,6 +11,7 @@ from sqlalchemy.engine import URL
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from dialogentis.jobs.models import OutboxEvent
+from dialogentis.telemetry import log_event
 
 Publisher = Callable[[UUID, UUID, str], Awaitable[None]]
 
@@ -40,8 +42,10 @@ async def dispatch_once(factory: async_sessionmaker[AsyncSession], publish: Publ
             )
         ).all()
         for event in events:
+            started = monotonic()
             await publish(event.job_id, event.organization_id, event.queue)
             event.published_at = datetime.now(UTC)
+            log_event("dispatcher", "job_published", started=started, job_id=event.job_id)
         return len(events)
 
 

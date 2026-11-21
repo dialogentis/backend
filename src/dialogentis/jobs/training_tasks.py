@@ -5,10 +5,11 @@ from uuid import UUID
 from taskiq import Context, TaskiqDepends
 
 from dialogentis.jobs.broker import create_broker
+from dialogentis.jobs.models import JOB_QUEUE_NAMES
 from dialogentis.jobs.tasks import Handler, _run
 from dialogentis.training.worker import prepare_training
 
-broker = create_broker("dialogentis.training")
+broker = create_broker(JOB_QUEUE_NAMES["training"])
 HANDLERS: dict[str, Handler] = {
     "agent.training": Handler(prepare_training, timeout_seconds=900, retryable=False)
 }

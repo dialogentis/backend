@@ -8,6 +8,7 @@ from taskiq_aio_pika import AioPikaBroker, Exchange, Queue
 from taskiq_aio_pika.exceptions import NoStartupError
 
 from dialogentis.config import get_settings
+from dialogentis.jobs.models import JOB_QUEUE_NAMES
 
 
 class JobBroker(AioPikaBroker):
@@ -38,7 +39,7 @@ class JobBroker(AioPikaBroker):
                 yield AckableMessage(data=message.body, ack=message.ack)
 
 
-def create_broker(queue_name: str = "dialogentis.jobs") -> JobBroker:
+def create_broker(queue_name: str = JOB_QUEUE_NAMES["normal"]) -> JobBroker:
     url = get_settings().broker_url
     if url is None:
         raise ValueError("BROKER_URL is required for workers")

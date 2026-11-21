@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 from uuid import UUID, uuid4
 
@@ -13,6 +14,7 @@ from dialogentis.jobs.training_tasks import HANDLERS
 from dialogentis.runtime.history_models import HistoryTurn
 from dialogentis.runtime.models import TestConversation as ConversationRecord
 from dialogentis.runtime.receipt_models import RuntimeReceipt
+from dialogentis.telemetry import logger
 from tests.test_auth import client_for
 from tests.test_exports import app as app
 from tests.test_exports import mark_published
@@ -70,6 +72,7 @@ child.main()
         marker = f"private-nlu-{uuid4().hex}"
         broker_url = app.state.settings.broker_url
         assert broker_url is not None
+        records = []
         async with await connect(broker_url.get_secret_value(), timeout=5) as connection:
             channel = await connection.channel()
             exchange = await channel.declare_exchange(
@@ -83,6 +86,9 @@ child.main()
             await echo.ack()
             with monkeypatch.context() as patch, caplog.at_level("DEBUG"):
                 patch.setattr(
+                    logger, "log", lambda _level, record: records.append(json.loads(record))
+                )
+                patch.setattr(
                     "dialogentis.runtime.executor.asyncio.create_subprocess_exec", failing_model
                 )
                 result = await owner.post(
@@ -95,7 +101,20 @@ child.main()
                 )
             assert await probe.get(fail=False, timeout=5) is None
         assert result.status_code == 200 and result.json()["error_code"] == "nlu_error"
-        assert marker not in result.text and marker not in caplog.text
+        assert (
+            marker not in result.text
+            and marker not in caplog.text
+            and marker not in json.dumps(records)
+        )
+        request_id = result.headers["x-request-id"]
+        turn_id = result.json()["turn_id"]
+        assert any(
+            entry.get("request_id") == request_id
+            and entry.get("turn_id") == turn_id
+            and entry.get("error_code") == "nlu_error"
+            and entry["event"] == "turn_finished"
+            for entry in records
+        )
         async with unit_of_work(factory, organization_id=org_id) as db:
             identifier_turn = UUID(result.json()["turn_id"])
             receipt = await db.get(RuntimeReceipt, identifier_turn)

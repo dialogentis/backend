@@ -93,7 +93,6 @@ services:
       FORWARDED_ALLOW_IPS: '*'
     depends_on:
       deletion-replay: {condition: service_completed_successfully}
-      rabbitmq: {condition: service_healthy}
     ports: ['127.0.0.1:18000:8000']
     volumes: [artifacts:/app/artifacts]
     healthcheck:

@@ -10,6 +10,7 @@ class DomainValidationError(Exception):
 
 
 def error_response(request: Request, status: int, code: str, message: str, details=None):
+    request.state.error_code = code
     return JSONResponse(
         status_code=status,
         content={

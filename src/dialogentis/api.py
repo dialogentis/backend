@@ -2,6 +2,7 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
+from time import monotonic
 from uuid import UUID, uuid4
 
 from fastapi import FastAPI, Request, Response
@@ -29,6 +30,7 @@ from dialogentis.drafts import router as drafts_router
 from dialogentis.flow_routes import router as flow_router
 from dialogentis.health import RuntimeReadiness, runtime_checks
 from dialogentis.integrations.routes import router as integrations_router
+from dialogentis.jobs.overview import router as job_overview_router
 from dialogentis.organizations import router as organizations_router
 from dialogentis.runtime.executor import RuntimeExecutor
 from dialogentis.runtime.history_deletion_routes import router as history_deletions_router
@@ -37,6 +39,7 @@ from dialogentis.runtime.history_routes import router as history_router
 from dialogentis.runtime.public_routes import router as public_runtime_router
 from dialogentis.runtime.routes import router as test_chat_router
 from dialogentis.runtime.test_chat import TestChatService
+from dialogentis.telemetry import log_event, request_id
 from dialogentis.versions.release_routes import router as releases_router
 from dialogentis.versions.routes import router as versions_router
 
@@ -88,6 +91,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(widget_channels_router)
     app.include_router(widget_runtime_router)
     app.include_router(datasets_router)
+    app.include_router(job_overview_router)
     app.include_router(exports_router)
     app.include_router(imports_router)
     app.include_router(versions_router)
@@ -102,30 +106,47 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.middleware("http")
     async def request_context(request: Request, call_next: Callable[[Request], Awaitable]):
-        request.state.request_id = str(uuid4())
-        length = request.headers.get("content-length", "0")
-        if not length.isdigit() or int(length) > config.max_body_bytes:
-            response = error_response(
-                request, 413, "payload_too_large", "Request body is too large"
+        started = monotonic()
+        identifier = uuid4()
+        request.state.request_id = str(identifier)
+        context = request_id.set(identifier)
+        try:
+            length = request.headers.get("content-length", "0")
+            try:
+                if not length.isdigit() or int(length) > config.max_body_bytes:
+                    response = error_response(
+                        request, 413, "payload_too_large", "Request body is too large"
+                    )
+                else:
+                    response = await call_next(request)
+            except Exception:
+                response = error_response(request, 500, "internal_error", "Внутренняя ошибка")
+            response.headers["X-Request-ID"] = request.state.request_id
+            response.headers["X-Content-Type-Options"] = "nosniff"
+            response.headers["Referrer-Policy"] = "no-referrer"
+            response.headers["Cache-Control"] = "no-store"
+            session = getattr(request.state, "session_cookie", None)
+            if session:
+                token, expires = session
+                response.set_cookie(
+                    COOKIE,
+                    token,
+                    max_age=max(0, int((expires - datetime.now(UTC)).total_seconds())),
+                    httponly=True,
+                    samesite="lax",
+                    secure=config.public_base_url.startswith("https://"),
+                )
+            log_event(
+                "api",
+                "request_finished",
+                started=started,
+                status=response.status_code,
+                operation=getattr(request.scope.get("route"), "name", None),
+                error_code=getattr(request.state, "error_code", None),
             )
-        else:
-            response = await call_next(request)
-        response.headers["X-Request-ID"] = request.state.request_id
-        response.headers["X-Content-Type-Options"] = "nosniff"
-        response.headers["Referrer-Policy"] = "no-referrer"
-        response.headers["Cache-Control"] = "no-store"
-        session = getattr(request.state, "session_cookie", None)
-        if session:
-            token, expires = session
-            response.set_cookie(
-                COOKIE,
-                token,
-                max_age=max(0, int((expires - datetime.now(UTC)).total_seconds())),
-                httponly=True,
-                samesite="lax",
-                secure=config.public_base_url.startswith("https://"),
-            )
-        return response
+            return response
+        finally:
+            request_id.reset(context)
 
     @app.exception_handler(HTTPException)
     async def http_error(request: Request, exc: HTTPException):
