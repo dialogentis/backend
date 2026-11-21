@@ -9,6 +9,7 @@ from dialogentis.jobs.tasks import process_job
 from dialogentis.jobs.training_tasks import HANDLERS
 from tests.test_auth import client_for
 from tests.test_exports import app as app
+from tests.test_exports import mark_published
 from tests.test_versions import create_agent
 
 pytestmark = [
@@ -34,6 +35,7 @@ async def test_demo_agent_imports_trains_and_answers(app, name):
         )
         assert uploaded.status_code == 202, uploaded.text
         preview_id = UUID(uploaded.json()["preview_id"])
+        await mark_published(app, org_id)
         await process_job(factory, preview_id, org_id)
         preview = await owner.get(f"{agent}/imports/{preview_id}")
         assert preview.status_code == 200 and preview.json()["can_apply"], preview.text
@@ -59,6 +61,7 @@ async def test_demo_agent_imports_trains_and_answers(app, name):
         )
         assert started.status_code == 202, started.text
         version_id, job_id = (UUID(started.json()[key]) for key in ("version_id", "job_id"))
+        await mark_published(app, org_id)
         await process_job(factory, job_id, org_id, HANDLERS, "training")
         version = await owner.get(f"{agent}/versions/{version_id}")
         assert version.status_code == 200 and version.json()["status"] == "ready", version.text
@@ -70,6 +73,8 @@ async def test_demo_agent_imports_trains_and_answers(app, name):
         )
         assert quality["intents"]["known_count"] == 25
         assert quality["intents"]["unknown_count"] == 20
+        assert quality["intents"]["macro_f1"] >= 0.85
+        assert quality["intents"]["unknown_rejection"] >= 0.80
         assert quality["entities"]["f1"] >= 0.85
 
         opened = await owner.post(

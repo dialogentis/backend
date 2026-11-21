@@ -1,7 +1,10 @@
 """Build the portable agent files and evaluate their frozen test sets."""
 
 import argparse
+import hashlib
 import json
+import platform
+from importlib.metadata import version
 
 from benchmarks.nlu.evaluate import FIXTURES, build_dataset, identifier
 from dialogentis.agents import empty_config
@@ -123,7 +126,22 @@ def main() -> None:
             "unknown_test_count": report.intents.unknown_count,
             "unknown_rejection": report.intents.unknown_rejection,
         }
-    print(json.dumps(results, indent=2))
+    print(
+        json.dumps(
+            {
+                "fixture_sha256": hashlib.sha256(FIXTURES.read_bytes()).hexdigest(),
+                "development_sha256": hashlib.sha256(DEVELOPMENT.read_bytes()).hexdigest(),
+                "uv_lock_sha256": hashlib.sha256(
+                    (FIXTURES.parents[2] / "uv.lock").read_bytes()
+                ).hexdigest(),
+                "python": platform.python_version(),
+                "platform": platform.platform(),
+                "scikit_learn": version("scikit-learn"),
+                "results": results,
+            },
+            indent=2,
+        )
+    )
 
 
 if __name__ == "__main__":

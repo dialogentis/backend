@@ -1,0 +1,40 @@
+{
+  "fixture_sha256": "4a8b50fc903a3d06733740e26b61cad175c22eb8b39bb756774ccdbe5f5b7ab7",
+  "development_sha256": "f4fb85a60917790d290f1ff4d218cd120b2d55885ea7247d557ebcc734e8adf4",
+  "uv_lock_sha256": "8a2045da5d7496134aed687cf3c1678a13486fe09159656ac909fe446f631a01",
+  "python": "3.14.6",
+  "platform": "Linux-6.12.76-linuxkit-aarch64-with-glibc2.36",
+  "scikit_learn": "1.9.1",
+  "results": {
+    "order_support": {
+      "settings": {
+        "score": 0.3,
+        "margin": 0.05,
+        "similarity": 0.2,
+        "vocabulary_coverage": 0.0,
+        "classifier_c": 1.0
+      },
+      "training_examples": 170,
+      "intent_macro_f1": 0.9484848484848485,
+      "entity_f1": 1.0,
+      "known_test_count": 25,
+      "unknown_test_count": 20,
+      "unknown_rejection": 0.85
+    },
+    "education": {
+      "settings": {
+        "score": 0.5,
+        "margin": 0.16,
+        "similarity": 0.15,
+        "vocabulary_coverage": 0.55,
+        "classifier_c": 10.0
+      },
+      "training_examples": 230,
+      "intent_macro_f1": 0.9777777777777779,
+      "entity_f1": 1.0,
+      "known_test_count": 25,
+      "unknown_test_count": 20,
+      "unknown_rejection": 1.0
+    }
+  }
+}

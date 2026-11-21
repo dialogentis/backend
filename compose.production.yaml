@@ -38,7 +38,9 @@ services:
     restart: unless-stopped
 
   api:
-    environment: *production-env
+    environment:
+      <<: *production-env
+      WEB_CONCURRENCY: ${API_WORKERS:-2}
     cpus: 4
     mem_limit: 4g
     pids_limit: 256
