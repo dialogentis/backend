@@ -1,10 +1,12 @@
 import asyncio
 import sys
+from dataclasses import replace
 from uuid import UUID, uuid4
 
 import pytest
 
 from dialogentis.http_action import HTTP_OUTPUTS
+from dialogentis.runtime.child import ModelCache
 from dialogentis.runtime.core import RuntimeState
 from dialogentis.runtime.executor import ExecutionError, RuntimeExecutor
 from dialogentis.training.worker import run_child
@@ -12,14 +14,33 @@ from dialogentis.versions.prepare import canonical_hash
 from tests.test_training_child import request_data
 
 
-async def test_child_executes_real_signed_model_and_rejects_wrong_identity_or_snapshot():
+@pytest.fixture
+async def executor():
+    runtime = RuntimeExecutor(timeout=20)
+    try:
+        yield runtime
+    finally:
+        await runtime.close()
+
+
+async def test_child_reuses_signed_model_but_rejects_wrong_identity_or_snapshot(
+    executor, monkeypatch
+):
     request, identity, snapshot, settings = request_data()
 
     async def progress(_):
         pass
 
     model, _ = await run_child(request, settings, progress)
-    executor = RuntimeExecutor(timeout=20)
+    spawn = asyncio.create_subprocess_exec
+    children = []
+
+    async def record_child(*args, **kwargs):
+        process = await spawn(*args, **kwargs)
+        children.append(process)
+        return process
+
+    monkeypatch.setattr("dialogentis.runtime.executor.asyncio.create_subprocess_exec", record_child)
     first = await executor.execute(
         action="start",
         snapshot=snapshot,
@@ -40,6 +61,7 @@ async def test_child_executes_real_signed_model_and_rejects_wrong_identity_or_sn
         text="👩🏽‍💻 доставьте в Москва номер 8",
     )
     assert second.state.turn == 1 and all("Москва" not in repr(item) for item in second.trace)
+    assert len(children) == 1 and children[0].returncode is None
     with pytest.raises(ExecutionError, match="runtime_failed"):
         await executor.execute(
             action="start",
@@ -49,7 +71,7 @@ async def test_child_executes_real_signed_model_and_rejects_wrong_identity_or_sn
             model=model,
             settings=settings,
         )
-    from dataclasses import replace
+    assert children[0].returncode is not None
 
     with pytest.raises(ExecutionError, match="runtime_failed"):
         await executor.execute(
@@ -60,9 +82,32 @@ async def test_child_executes_real_signed_model_and_rejects_wrong_identity_or_sn
             model=model,
             settings=settings,
         )
+    assert len(children) == 2 and children[1].returncode is not None
 
 
-async def test_http_bridge_validates_and_bounds_private_action_exchange():
+def test_model_cache_evicts_least_recent_and_checks_identity_and_bytes(monkeypatch):
+    _, identity, _, settings = request_data()
+    other = replace(identity, organization_id=uuid4())
+    cached = ModelCache(settings, limit=6)
+    calls = []
+
+    def unpack(artifact, identity, settings):
+        calls.append((artifact, identity))
+        return object()
+
+    monkeypatch.setattr("dialogentis.runtime.child.unpack_model", unpack)
+    first = cached.load(identity, b"one")
+    cached.load(identity, b"two")
+    assert cached.load(identity, b"one") is first
+    assert cached.load(other, b"one") is not first
+    assert cached.size == 6
+    cached.load(identity, b"two")
+    assert calls == [(b"one", identity), (b"two", identity), (b"one", other), (b"two", identity)]
+    cached.load(identity, b"too big")
+    assert cached.size == 6
+
+
+async def test_http_bridge_validates_and_bounds_private_action_exchange(executor):
     request, identity, snapshot, settings = request_data()
 
     async def progress(_):
@@ -114,8 +159,8 @@ async def test_http_bridge_validates_and_bounds_private_action_exchange():
         seen.append((node_id, values))
         return "success", {"status": "ready"}
 
-    async def execute(callback, limit=20):
-        return await RuntimeExecutor(timeout=limit).execute(
+    async def execute(callback, runtime=executor):
+        return await runtime.execute(
             action="start",
             snapshot=snapshot,
             config_hash=canonical_hash(snapshot),
@@ -129,6 +174,13 @@ async def test_http_bridge_validates_and_bounds_private_action_exchange():
     assert seen == [(UUID(action_id), {"order": "private-order"})]
     assert result.messages == ("ready",) and result.state.status == "waiting_input"
     assert "private-order" not in repr(result.trace) and "ready" not in repr(result.trace)
+    process = executor._idle[0][1]
+
+    async def changed(_, __):
+        return "success", {"status": "shipped"}
+
+    assert (await execute(changed)).messages == ("shipped",)
+    assert executor._idle[0][1] is process
 
     async def invalid(_, __):
         return "success", {"order": "tampered"}
@@ -141,7 +193,7 @@ async def test_http_bridge_validates_and_bounds_private_action_exchange():
         return "success", {}
 
     with pytest.raises(ExecutionError, match="runtime_timeout"):
-        await execute(slow, 2)
+        await execute(slow, RuntimeExecutor(timeout=2))
 
 
 async def test_http_bridge_rejects_action_not_in_snapshot(monkeypatch):

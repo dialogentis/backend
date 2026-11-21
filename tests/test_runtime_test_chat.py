@@ -21,12 +21,10 @@ from dialogentis.jobs.tasks import process_job
 from dialogentis.jobs.training_tasks import HANDLERS
 from dialogentis.models import AgentDraft, Membership
 from dialogentis.runtime.cleanup import cleanup_expired_conversations
-from dialogentis.runtime.executor import RuntimeExecutor
 from dialogentis.runtime.history import load_dialogue_context
 from dialogentis.runtime.history_models import ConversationHistory, HistoryTurn
 from dialogentis.runtime.models import TestConversation as ConversationRecord
 from dialogentis.runtime.receipt_models import RuntimeReceipt
-from dialogentis.runtime.test_chat import TestChatService as ChatService
 from dialogentis.runtime.watchdog import recover_once
 from tests.test_auth import client_for
 from tests.test_exports import app as app
@@ -242,7 +240,7 @@ async def test_mock_and_live_http_actions_use_organization_policy(app, monkeypat
             draft.configuration = config
         version = (await prepare(app, user_id, org_id, agent_id, 1, "http-mock-test")).version
         await process_job(app.state.session_factory, version.job_id, org_id, HANDLERS, "training")
-        service = ChatService(app.state.session_factory, app.state.settings, RuntimeExecutor())
+        service = app.state.test_chat_service
         result = await service.start(user_id, org_id, agent_id, version.id)
         assert result.status == "waiting_input" and result.messages == ("Статус: готов",)
         assert "готов" not in repr(result.trace) and "private-token" not in repr(result)
@@ -427,8 +425,8 @@ async def test_real_model_chat_and_revoked_access_during_execution(app, monkeypa
         await process_job(app.state.session_factory, job_id, org_id, HANDLERS, "training")
         async with unit_of_work(app.state.session_factory, organization_id=org_id) as db:
             db.add(Membership(organization_id=org_id, user_id=viewer_id, role="viewer"))
-        executor = RuntimeExecutor()
-        service = ChatService(app.state.session_factory, app.state.settings, executor)
+        service = app.state.test_chat_service
+        executor = service.executor
         started = await service.start(viewer_id, org_id, agent_id, version_id)
         assert started.revision == 1 and started.status == "waiting_input"
         assert started.credential is not None and started.credential not in repr(started)

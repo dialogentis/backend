@@ -113,13 +113,15 @@ class TestChatService:
 
     async def shutdown(self, grace_period: float = 30) -> None:
         self._closing = True
-        if not self._pending:
-            return
-        _, pending = await asyncio.wait(self._pending, timeout=grace_period)
-        for task in pending:
-            task.cancel()
-        if pending:
-            await asyncio.gather(*pending, return_exceptions=True)
+        try:
+            if self._pending:
+                _, pending = await asyncio.wait(self._pending, timeout=grace_period)
+                for task in pending:
+                    task.cancel()
+                if pending:
+                    await asyncio.gather(*pending, return_exceptions=True)
+        finally:
+            await self.executor.close()
 
     async def _user(self, db: AsyncSession, user_id: Actor) -> Principal:
         if isinstance(user_id, PublicAccess):

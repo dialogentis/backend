@@ -1,11 +1,14 @@
-"""Execute one runtime turn in an isolated process; stdin/stdout are private pipes."""
+"""Execute sequential turns in an isolated process over private pipes."""
 
+import hashlib
 import json
 import os
 import queue
+import resource
 import struct
 import sys
 import threading
+from collections import OrderedDict
 from dataclasses import asdict
 from functools import lru_cache
 from uuid import UUID
@@ -15,6 +18,7 @@ from pydantic import SecretStr
 from dialogentis.config import Settings
 from dialogentis.handoff import MAX_HANDOFF_DEPTH
 from dialogentis.http_action import MockIntegration
+from dialogentis.nlu.adapter import NLUAdapter
 from dialogentis.nlu.model_store import ModelIdentity, unpack_model
 from dialogentis.runtime.core import RuntimeEngine, RuntimeState
 from dialogentis.runtime.history_context import HistoryContext
@@ -32,30 +36,50 @@ def _read_exact(size: int) -> bytes:
     return data
 
 
-def _watch_parent() -> None:
-    if not os.read(sys.stdin.fileno(), 1):
-        os._exit(73)
+def _read_packet(model_limit: int) -> tuple[dict, bytes]:
+    size, model_size = struct.unpack(">II", _read_exact(8))
+    if not 1 <= size <= MAX_REQUEST or not 0 <= model_size <= model_limit:
+        raise ValueError("Invalid packet size")
+    return json.loads(_read_exact(size)), _read_exact(model_size)
 
 
-def _read_replies(replies: queue.Queue, model_limit: int) -> None:
-    def read_exact(size: int) -> bytes:
-        data = bytearray()
-        while len(data) < size:
-            part = os.read(sys.stdin.fileno(), size - len(data))
-            if not part:
-                raise EOFError()
-            data.extend(part)
-        return bytes(data)
-
+def _read_packets(packets: queue.Queue, model_limit: int) -> None:
     try:
         while True:
-            size, model_size = struct.unpack(">II", read_exact(8))
-            if not 1 <= size <= MAX_REQUEST or not 0 <= model_size <= model_limit:
-                raise ValueError("Invalid response size")
-            parsed = json.loads(read_exact(size))
-            replies.put((parsed, read_exact(model_size)))
+            packets.put(_read_packet(model_limit))
     except Exception:
         os._exit(73)
+
+
+def _peak_rss() -> int:
+    size = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return size if sys.platform == "darwin" else size * 1024
+
+
+class ModelCache:
+    def __init__(self, settings: Settings, limit: int):
+        self.settings = settings
+        self.limit = limit
+        self.size = 0
+        self.models: OrderedDict[tuple[ModelIdentity, bytes], tuple[NLUAdapter, int]] = (
+            OrderedDict()
+        )
+
+    def load(self, identity: ModelIdentity, artifact: bytes) -> NLUAdapter:
+        key = (identity, hashlib.sha256(artifact).digest())
+        if key in self.models:
+            self.models.move_to_end(key)
+            return self.models[key][0]
+        size = len(artifact)
+        if size <= self.limit:
+            while self.models and self.size + size > self.limit:
+                _, (_, removed_size) = self.models.popitem(last=False)
+                self.size -= removed_size
+        model = unpack_model(artifact, identity, self.settings)
+        if size <= self.limit:
+            self.models[key] = (model, size)
+            self.size += size
+        return model
 
 
 def _write_frame(value: dict) -> None:
@@ -68,39 +92,23 @@ def _write_frame(value: dict) -> None:
     sys.stdout.buffer.flush()
 
 
-def main() -> None:
-    request_size, model_size = struct.unpack(">II", _read_exact(8))
-    model_limit = int(os.environ["DIALOGENTIS_RUNTIME_MODEL_LIMIT"])
-    if not 1 <= request_size <= MAX_REQUEST or not 1 <= model_size <= model_limit:
-        raise ValueError("Invalid request size")
-    request = json.loads(_read_exact(request_size))
-    model = _read_exact(model_size)
-    replies: queue.Queue = queue.Queue(maxsize=1)
+def _execute_turn(packets: queue.Queue, cache: ModelCache, rss_ceiling: int) -> bool:
+    request, model = packets.get()
+    if not model:
+        raise ValueError("Runtime model missing")
     handoff = request.get("handoff_bridge") is True
     historical = handoff and request.get("history_bridge") is True
-    bridged = handoff or request.get("http_bridge") is True
-    threading.Thread(
-        target=_read_replies if bridged else _watch_parent,
-        args=(replies, model_limit) if bridged else (),
-        daemon=True,
-    ).start()
     identity = ModelIdentity(
         *(
             UUID(request[key])
             for key in ("organization_id", "agent_id", "version_id", "artifact_id")
         )
     )
-    settings = Settings(
-        _env_file=None,
-        encryption_key=SecretStr(os.environ["DIALOGENTIS_RUNTIME_KEY"]),
-        encryption_key_version=int(os.environ["DIALOGENTIS_RUNTIME_KEY_VERSION"]),
-        max_model_artifact_bytes=model_limit,
-    )
 
     @lru_cache(maxsize=MAX_HANDOFF_DEPTH)
     def load_target(version_id: UUID) -> RuntimeEngine | None:
         _write_frame({"kind": "handoff_target", "version_id": str(version_id)})
-        reply, target_model = replies.get()
+        reply, target_model = packets.get()
         if reply == {"kind": "unavailable"} and not target_model:
             return None
         if reply["kind"] != "target" or UUID(reply["version_id"]) != version_id:
@@ -118,7 +126,7 @@ def main() -> None:
         _write_frame(
             {"kind": "handoff_history", "version_id": str(version_id), "node_id": str(node_id)}
         )
-        reply, extra = replies.get()
+        reply, extra = packets.get()
         if extra:
             raise ValueError("Invalid history response")
         return HistoryContext.model_validate(reply)
@@ -127,7 +135,7 @@ def main() -> None:
         snapshot = payload["snapshot"]
         if snapshot["schema_version"] != 1 or canonical_hash(snapshot) != payload["config_hash"]:
             raise ValueError("Invalid snapshot")
-        adapter = unpack_model(artifact, model_identity, settings)
+        adapter = cache.load(model_identity, artifact)
 
         def http_handler(node_id: UUID, values: dict) -> tuple[str, dict]:
             _write_frame(
@@ -138,7 +146,7 @@ def main() -> None:
                     "version_id": str(model_identity.version_id),
                 }
             )
-            reply, extra = replies.get()
+            reply, extra = packets.get()
             if extra or not isinstance(reply, dict) or set(reply) != {"outcome", "updates"}:
                 raise ValueError("Invalid action response")
             return reply["outcome"], reply["updates"]
@@ -174,7 +182,28 @@ def main() -> None:
         "trace": [asdict(event) for event in result.trace],
         "error_code": result.error_code,
     }
-    _write_frame({"kind": "result", "result": output} if bridged else output)
+    load_target.cache_clear()
+    load_history.cache_clear()
+    recycle = _peak_rss() > rss_ceiling
+    _write_frame({"kind": "result", "result": output, "recycle": recycle})
+    return recycle
+
+
+def main() -> None:
+    model_limit = int(os.environ["DIALOGENTIS_RUNTIME_MODEL_LIMIT"])
+    cache_limit = int(os.environ["DIALOGENTIS_RUNTIME_CACHE_LIMIT"])
+    settings = Settings(
+        _env_file=None,
+        encryption_key=SecretStr(os.environ["DIALOGENTIS_RUNTIME_KEY"]),
+        encryption_key_version=int(os.environ["DIALOGENTIS_RUNTIME_KEY_VERSION"]),
+        max_model_artifact_bytes=model_limit,
+    )
+    cache = ModelCache(settings, cache_limit)
+    rss_ceiling = _peak_rss() + cache_limit
+    packets: queue.Queue = queue.Queue(maxsize=1)
+    threading.Thread(target=_read_packets, args=(packets, model_limit), daemon=True).start()
+    while not _execute_turn(packets, cache, rss_ceiling):
+        pass
 
 
 if __name__ == "__main__":

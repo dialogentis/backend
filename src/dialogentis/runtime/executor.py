@@ -1,4 +1,4 @@
-"""Hard-bounded child-process execution for one trusted model and runtime turn."""
+"""Run each turn in an isolated child with a bounded lifetime and model cache."""
 
 import asyncio
 import json
@@ -9,7 +9,16 @@ from dataclasses import dataclass, field
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr, ValidationError
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SecretStr,
+    StrictBool,
+    StrictInt,
+    StrictStr,
+    ValidationError,
+)
 
 from dialogentis.config import Settings
 from dialogentis.flow_schema import Flow
@@ -126,12 +135,67 @@ class ResultView(BaseModel):
     nlu_observations: tuple[NLUObservation, ...] = Field(default=(), max_length=MAX_TRANSITIONS + 1)
 
 
+async def _stop_child(process: asyncio.subprocess.Process) -> None:
+    if process.stdin is not None:
+        process.stdin.close()
+    if process.returncode is None:
+        try:
+            process.kill()
+        except ProcessLookupError:
+            pass
+    if process.stdout is not None:
+        while await process.stdout.read(65536):
+            pass
+    await process.wait()
+
+
+type ChildConfig = tuple[SecretStr, int, int]
+
+
 class RuntimeExecutor:
     def __init__(self, concurrency: int = 4, timeout: float = 20):
         if type(concurrency) is not int or concurrency < 1 or not 0 < timeout <= 20:
             raise ValueError("Invalid runtime execution limits")
         self._semaphore = asyncio.Semaphore(concurrency)
+        self._cache_limit = 1024**3 // concurrency
         self._timeout = timeout
+        self._idle: list[tuple[ChildConfig, asyncio.subprocess.Process]] = []
+        self._closed = False
+
+    async def close(self) -> None:
+        self._closed = True
+        idle, self._idle = self._idle, []
+        await asyncio.gather(*(_stop_child(process) for _, process in idle))
+
+    async def _child(self, config: ChildConfig) -> asyncio.subprocess.Process:
+        while self._idle:
+            previous, process = self._idle.pop()
+            if previous == config and process.returncode is None and process.stdout is not None:
+                if not process.stdout.at_eof():
+                    return process
+            await self._retire(process)
+        if self._closed:
+            raise ExecutionError("runtime_unavailable")
+        encryption_key, key_version, model_limit = config
+        return await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-m",
+            "dialogentis.runtime.child",
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+            env={
+                "LANG": "C.UTF-8",
+                "OMP_NUM_THREADS": "1",
+                "OPENBLAS_NUM_THREADS": "1",
+                "MKL_NUM_THREADS": "1",
+                "NUMEXPR_NUM_THREADS": "1",
+                "DIALOGENTIS_RUNTIME_KEY": encryption_key.get_secret_value(),
+                "DIALOGENTIS_RUNTIME_KEY_VERSION": str(key_version),
+                "DIALOGENTIS_RUNTIME_MODEL_LIMIT": str(model_limit),
+                "DIALOGENTIS_RUNTIME_CACHE_LIMIT": str(self._cache_limit),
+            },
+        )
 
     async def execute(
         self,
@@ -213,6 +277,8 @@ class RuntimeExecutor:
         try:
             async with asyncio.timeout(self._timeout):
                 async with self._semaphore:
+                    if self._closed:
+                        raise ExecutionError("runtime_unavailable")
                     return await self._run(
                         request,
                         model,
@@ -244,25 +310,16 @@ class RuntimeExecutor:
         history_loader: HistoryLoader | None,
     ) -> RuntimeResult:
         assert settings.encryption_key is not None
-        env = {
-            "LANG": "C.UTF-8",
-            "OMP_NUM_THREADS": "1",
-            "OPENBLAS_NUM_THREADS": "1",
-            "MKL_NUM_THREADS": "1",
-            "NUMEXPR_NUM_THREADS": "1",
-            "DIALOGENTIS_RUNTIME_KEY": settings.encryption_key.get_secret_value(),
-            "DIALOGENTIS_RUNTIME_KEY_VERSION": str(settings.encryption_key_version),
-            "DIALOGENTIS_RUNTIME_MODEL_LIMIT": str(settings.max_model_artifact_bytes),
-        }
-        process = await asyncio.create_subprocess_exec(
-            sys.executable,
-            "-m",
-            "dialogentis.runtime.child",
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
-            env=env,
+        child_config = (
+            settings.encryption_key,
+            settings.encryption_key_version,
+            settings.max_model_artifact_bytes,
         )
+        try:
+            process = await self._child(child_config)
+        except OSError:
+            raise ExecutionError("runtime_unavailable") from None
+        reusable = False
         try:
             assert process.stdin is not None and process.stdout is not None
 
@@ -285,14 +342,19 @@ class RuntimeExecutor:
                 size = struct.unpack(">I", await process.stdout.readexactly(4))[0]
                 if not 1 <= size <= MAX_RESPONSE:
                     raise ExecutionError("runtime_invalid_response")
-                output = await process.stdout.readexactly(size)
-                if http_handler is None and target_loader is None:
-                    break
-                frame = json.loads(output)
+                frame = json.loads(await process.stdout.readexactly(size))
                 if not isinstance(frame, dict):
                     raise ExecutionError("runtime_invalid_response")
-                if frame.get("kind") == "result" and set(frame) == {"kind", "result"}:
-                    output = json.dumps(frame["result"], allow_nan=False).encode()
+                if frame.get("kind") == "result":
+                    if (
+                        set(frame) != {"kind", "result", "recycle"}
+                        or type(frame["recycle"]) is not bool
+                    ):
+                        raise ExecutionError("runtime_invalid_response")
+                    view = ResultView.model_validate(frame["result"])
+                    if view.state.version_id != identity.version_id:
+                        raise ExecutionError("runtime_invalid_response")
+                    reusable = not frame["recycle"]
                     break
                 if frame.get("kind") == "handoff_target" and target_loader is not None:
                     requested = TargetFrame.model_validate(frame).version_id
@@ -395,11 +457,6 @@ class RuntimeExecutor:
                 if not 1 <= len(response) <= MAX_RESPONSE:
                     raise ExecutionError("runtime_invalid_response")
                 await write_packet(response)
-            if await process.wait() != 0:
-                raise ExecutionError("runtime_failed")
-            view = ResultView.model_validate_json(output)
-            if view.state.version_id != identity.version_id:
-                raise ExecutionError("runtime_invalid_response")
             return RuntimeResult(
                 view.state,
                 view.messages,
@@ -423,26 +480,22 @@ class RuntimeExecutor:
         ):
             raise ExecutionError("runtime_failed") from None
         finally:
+            if reusable and not self._closed and process.returncode is None:
+                self._idle.append((child_config, process))
+            else:
+                await self._retire(process)
 
-            async def stop() -> None:
-                if process.stdin is not None:
-                    process.stdin.close()
-                if process.returncode is None:
-                    try:
-                        process.kill()
-                    except ProcessLookupError:
-                        pass
-                await process.wait()
-
-            cleanup = asyncio.create_task(stop())
-            interrupted = False
-            while True:
-                try:
-                    await asyncio.shield(cleanup)
-                    break
-                except asyncio.CancelledError:
-                    if cleanup.cancelled():
-                        raise
-                    interrupted = True
-            if interrupted:
-                raise asyncio.CancelledError
+    @staticmethod
+    async def _retire(process: asyncio.subprocess.Process) -> None:
+        cleanup = asyncio.create_task(_stop_child(process))
+        interrupted = False
+        while True:
+            try:
+                await asyncio.shield(cleanup)
+                break
+            except asyncio.CancelledError:
+                if cleanup.cancelled():
+                    raise
+                interrupted = True
+        if interrupted:
+            raise asyncio.CancelledError

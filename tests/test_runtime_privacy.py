@@ -11,6 +11,7 @@ from dialogentis.db import unit_of_work
 from dialogentis.jobs.models import OutboxEvent
 from dialogentis.jobs.tasks import process_job
 from dialogentis.jobs.training_tasks import HANDLERS
+from dialogentis.runtime.executor import RuntimeExecutor
 from dialogentis.runtime.history_models import HistoryTurn
 from dialogentis.runtime.models import TestConversation as ConversationRecord
 from dialogentis.runtime.receipt_models import RuntimeReceipt
@@ -48,6 +49,9 @@ async def test_nlu_exception_does_not_retain_or_publish_private_input(app, monke
         )
         assert started.status_code == 201, started.text
         conversation = started.json()
+        service = app.state.test_chat_service
+        await service.executor.close()
+        service.executor = RuntimeExecutor()
         identifier = UUID(conversation["conversation_id"])
         async with unit_of_work(factory, organization_id=org_id) as db:
             before = set(await db.scalars(select(OutboxEvent.id)))
