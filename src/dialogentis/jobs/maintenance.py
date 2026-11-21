@@ -12,6 +12,7 @@ from dialogentis.analytics_models import MetricHour
 from dialogentis.artifact_records import Artifact
 from dialogentis.artifact_service import ArtifactUnavailable, cleanup_expired, cleanup_orphans
 from dialogentis.artifacts import ArtifactStorage
+from dialogentis.audit import cleanup_audit
 from dialogentis.config import get_settings
 from dialogentis.datasets.export_worker import scrub_exports
 from dialogentis.datasets.import_worker import scrub_imports
@@ -21,6 +22,7 @@ from dialogentis.jobs.dispatcher import dispatcher_factory
 from dialogentis.jobs.lifecycle import recover_tenant
 from dialogentis.jobs.models import MaintenanceRun, OutboxEvent
 from dialogentis.models import Organization
+from dialogentis.organizations import AuditEvent
 from dialogentis.runtime.cleanup import (
     cleanup_expired_conversations,
     cleanup_expired_receipts,
@@ -62,6 +64,9 @@ async def reconcile_once(
             metric_organizations = (
                 await db.scalars(select(MetricHour.organization_id).distinct())
             ).all()
+            audit_organizations = (
+                await db.scalars(select(AuditEvent.organization_id).distinct())
+            ).all()
         for organization_id in organizations:
             for _ in range(10):
                 if await recover_tenant(factory, organization_id, retryable_kinds) < 100:
@@ -95,6 +100,9 @@ async def reconcile_once(
         for organization_id in metric_organizations:
             async with unit_of_work(factory, organization_id=organization_id) as db:
                 await cleanup_metrics(db, organization_id, window)
+        for organization_id in audit_organizations:
+            async with unit_of_work(factory, organization_id=organization_id) as db:
+                await cleanup_audit(db, organization_id, window)
         storage = ArtifactStorage(get_settings().artifact_root)
         filesystem_organizations = await asyncio.to_thread(storage.organizations)
         for organization_id in set(artifact_organizations) | set(filesystem_organizations):

@@ -31,13 +31,16 @@ from dialogentis.models import Agent, AgentDraft
 from dialogentis.organizations import organization_context
 
 router = APIRouter(prefix="/api/v1/organizations/{org_id}/analytics", tags=["analytics"])
+type ReportChannel = Literal["production", "api", "widget", "test", "all"]
 
 
 class AnalyticsFilters(InputModel):
     start: date | None = Field(None, alias="from")
     end: date | None = Field(None, alias="to")
     time_zone: str = Field("UTC", min_length=1, max_length=80)
-    channel: Literal["production", "api", "widget", "test", "all"] = "production"
+    timezone: str | None = Field(None, min_length=1, max_length=80)
+    channel: ReportChannel = "production"
+    channel_type: ReportChannel | None = None
     agent_id: UUID | None = None
     intent_scope: Literal["root", "active"] = "root"
 
@@ -68,11 +71,14 @@ class AnalyticsIntent(BaseModel):
     count: int
 
 
-class AnalyticsView(BaseModel):
+class AnalyticsPeriod(BaseModel):
     start: date
     end: date
     time_zone: str
     as_of: datetime
+
+
+class AnalyticsSummary(AnalyticsPeriod):
     dialogues: int
     messages: int
     fallback: AnalyticsRate
@@ -81,6 +87,21 @@ class AnalyticsView(BaseModel):
     internal_latency: AnalyticsLatency
     external_http_latency: AnalyticsLatency
     latency_method: Literal["nearest_rank_bucket_upper_bound"] = "nearest_rank_bucket_upper_bound"
+
+
+class AnalyticsTimeseries(AnalyticsPeriod):
+    series: list[AnalyticsPoint]
+
+
+class AnalyticsIntents(AnalyticsPeriod):
+    intents: list[AnalyticsIntent]
+
+
+class AnalyticsErrors(AnalyticsPeriod):
+    errors: AnalyticsRate
+
+
+class AnalyticsView(AnalyticsSummary):
     series: list[AnalyticsPoint]
     intents: list[AnalyticsIntent]
 
@@ -136,7 +157,7 @@ async def analytics_report(
         raise HTTPException(404, "Агент не найден")
     as_of = datetime.now(UTC)
     try:
-        zone = ZoneInfo(query.time_zone)
+        zone = ZoneInfo(query.timezone or query.time_zone)
         end = query.end or as_of.astimezone(zone).date()
         start = query.start or end - timedelta(days=6)
         if not 0 <= (end - start).days < 90:
@@ -178,10 +199,11 @@ async def analytics_report(
         .group_by(MetricHour.metric, MetricHour.item, by_day, by_agent)
         .having(func.sum(count) > 0)
     )
-    if query.channel == "production":
+    channel = query.channel_type or query.channel
+    if channel == "production":
         statement = statement.where(MetricHour.channel.in_(("api", "widget")))
-    elif query.channel != "all":
-        statement = statement.where(MetricHour.channel == query.channel)
+    elif channel != "all":
+        statement = statement.where(MetricHour.channel == channel)
     intent_filter = MetricHour.metric == "intent"
     if query.intent_scope == "root":
         statement = statement.where(
@@ -256,4 +278,38 @@ async def analytics_report(
             )
             for total, agent, intent in top
         ],
+    )
+
+
+@router.get("/summary", response_model=AnalyticsSummary)
+async def analytics_summary(
+    org_id: UUID, query: Annotated[AnalyticsFilters, Query()], user: VerifiedUser, db: Database
+):
+    return await analytics_report(org_id, query, user, db)
+
+
+@router.get("/timeseries", response_model=AnalyticsTimeseries)
+async def analytics_timeseries(
+    org_id: UUID, query: Annotated[AnalyticsFilters, Query()], user: VerifiedUser, db: Database
+):
+    return AnalyticsTimeseries.model_validate(
+        await analytics_report(org_id, query, user, db), from_attributes=True
+    )
+
+
+@router.get("/intents", response_model=AnalyticsIntents)
+async def analytics_intents(
+    org_id: UUID, query: Annotated[AnalyticsFilters, Query()], user: VerifiedUser, db: Database
+):
+    return AnalyticsIntents.model_validate(
+        await analytics_report(org_id, query, user, db), from_attributes=True
+    )
+
+
+@router.get("/errors", response_model=AnalyticsErrors)
+async def analytics_errors(
+    org_id: UUID, query: Annotated[AnalyticsFilters, Query()], user: VerifiedUser, db: Database
+):
+    return AnalyticsErrors.model_validate(
+        await analytics_report(org_id, query, user, db), from_attributes=True
     )

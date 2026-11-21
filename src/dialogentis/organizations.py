@@ -11,6 +11,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     ForeignKeyConstraint,
+    Index,
     String,
     func,
     select,
@@ -43,6 +44,7 @@ Permission = Literal[
     "manage_channels",
     "manage_history",
     "publish_agents",
+    "view_audit",
 ]
 ROLE_PERMISSIONS: dict[str, frozenset[Permission]] = {
     "owner": frozenset(
@@ -58,6 +60,7 @@ ROLE_PERMISSIONS: dict[str, frozenset[Permission]] = {
             "manage_channels",
             "manage_history",
             "publish_agents",
+            "view_audit",
         }
     ),
     "admin": frozenset(
@@ -70,6 +73,7 @@ ROLE_PERMISSIONS: dict[str, frozenset[Permission]] = {
             "manage_channels",
             "manage_history",
             "publish_agents",
+            "view_audit",
         }
     ),
     "editor": frozenset({"manage_agents"}),
@@ -98,6 +102,7 @@ class AuditEvent(Base):
     target_id: Mapped[UUID] = mapped_column()
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     details: Mapped[dict] = mapped_column(JSONB, default=dict, server_default="{}")
+    __table_args__ = (Index("ix_audit_events_timeline", "organization_id", "created_at", "id"),)
 
 
 class OrganizationDeletion(Base):
@@ -346,7 +351,12 @@ async def update_organization(
     if body.purge_existing_text or body.history_retention_days is not None:
         await cleanup_history(db, org, purge_text=bool(body.purge_existing_text))
     org.settings_revision += 1
-    audit(db, org_id, user, "organization.settings_changed", org_id)
+    details = body.model_dump(
+        include={"history_retention_days", "store_message_text"}, exclude_none=True
+    )
+    if body.purge_existing_text:
+        details["purge_existing_text"] = True
+    audit(db, org_id, user, "organization.settings_changed", org_id, details=details)
     await db.flush()
     response.headers["ETag"] = revision_etag(org.settings_revision)
     return {**org_json(org), "role": membership.role}
@@ -382,8 +392,16 @@ async def set_role(org_id: UUID, user_id: UUID, body: RoleInput, user: VerifiedU
         and (target.role == "admin" or body.role == "admin")
     ):
         raise HTTPException(403, "Изменение этой роли недоступно")
+    before = target.role
     target.role = body.role
-    audit(db, org_id, user, "member.role_changed", user_id)
+    audit(
+        db,
+        org_id,
+        user,
+        "member.role_changed",
+        user_id,
+        details={"role_before": before, "role_after": target.role},
+    )
     return {"user_id": str(user_id), "role": target.role}
 
 

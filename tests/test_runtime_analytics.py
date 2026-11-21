@@ -178,6 +178,16 @@ async def test_runtime_counts_replay_handoff_and_abandoned_turn_once(app):
         assert [(item["agent_id"], item["intent_name"]) for item in active.json()["intents"]] == [
             (str(target_id), "Заказ"),
         ]
+        filters = {"channel_type": "test", "timezone": "UTC"}
+        summary = await owner.get(f"{report}/summary", params=filters)
+        assert summary.status_code == 200 and summary.json()["messages"] == 3
+        for section, field in (
+            ("timeseries", "series"),
+            ("intents", "intents"),
+            ("errors", "errors"),
+        ):
+            response = await owner.get(f"{report}/{section}", params=filters)
+            assert response.status_code == 200 and response.json()[field] == test[field]
 
 
 async def test_hourly_upsert_preserves_minutes_and_expires_deduplication_keys(app):
