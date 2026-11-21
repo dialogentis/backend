@@ -80,6 +80,18 @@ def test_fallback_reasons_are_ordered_and_prevent_intent_selection():
     assert model.predict("xyz", Thresholds(score=0, margin=0, similarity=0.2)).intent_id is None
 
 
+def test_vocabulary_coverage_rejects_unfamiliar_content_without_changing_old_models():
+    model = train_intents(training_dataset(), classifier_c=10.0)
+    assert model.classifier.C == model.manifest["classifier_c"] == 10.0
+    settings = Thresholds(0, 0, 0, vocabulary_coverage=0.55)
+    assert model.predict("где заказы 12", settings).intent_id is not None
+    mixed = "где заказ фламинго гиппопотам фиалка"
+    assert model.predict(mixed, settings).fallback_reasons == ("low_vocabulary_coverage",)
+    legacy = Thresholds(0, 0, 0)
+    object.__delattr__(legacy, "vocabulary_coverage")
+    assert model.predict(mixed, legacy).intent_id is not None
+
+
 def test_training_rejects_leakage_and_invalid_thresholds_or_input():
     data = training_dataset()
     data.examples[-1].text = data.examples[0].text.upper()

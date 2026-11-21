@@ -32,7 +32,13 @@ from dialogentis.templates import TemplateError, render_template
 
 MAX_TRANSITIONS = 50
 MAX_SECONDS = 20
-FALLBACK_REASONS = {"empty_features", "low_score", "ambiguous_intent", "low_similarity"}
+FALLBACK_REASONS = {
+    "empty_features",
+    "low_score",
+    "ambiguous_intent",
+    "low_similarity",
+    "low_vocabulary_coverage",
+}
 SAFE_FAILURE = "Не удалось выполнить сценарий. Попробуйте позже."
 MASKED = "[скрыто]"
 

@@ -16,6 +16,7 @@ from dialogentis.deletion_worker import purge_tenant
 from dialogentis.jobs.lifecycle import cancel
 from dialogentis.jobs.models import Job, OutboxEvent
 from dialogentis.models import Agent, AgentDraft, Membership, User
+from dialogentis.nlu.settings import NLUSettings
 from dialogentis.versions.models import AgentVersion
 from dialogentis.versions.prepare import TrainingInProgress, prepare_version, version_status
 from tests.test_auth import account, client_for
@@ -87,11 +88,7 @@ async def test_snapshot_idempotency_concurrency_and_job_lifecycle(app):
                     Job(id=uuid4(), organization_id=org_id, kind="agent.training", status="queued"),
                 )
             assert version.number == 1 and version.source_revision == 1
-            assert version.snapshot["nlu_settings"] == {
-                "score": 0.55,
-                "margin": 0.15,
-                "similarity": 0.2,
-            }
+            assert version.snapshot["nlu_settings"] == NLUSettings().model_dump()
             assert version.idempotency_key_hash != "same-key"
             assert job.kind == "agent.training" and job.queue == event.queue == "training"
             draft = await db.scalar(select(AgentDraft).where(AgentDraft.agent_id == agent_id))

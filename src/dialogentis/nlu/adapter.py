@@ -41,11 +41,13 @@ class NLUAdapter:
         dataset: Dataset,
         thresholds: Thresholds,
         on_stage: Callable[[str], None] | None = None,
+        *,
+        classifier_c: float = 1.0,
     ) -> NLUAdapter:
         snapshot = dataset.model_copy(deep=True)
         if on_stage:
             on_stage("intent_training")
-        intent_model = train_intents(snapshot)
+        intent_model = train_intents(snapshot, classifier_c=classifier_c)
         if on_stage and any(item.method == "learned" for item in snapshot.entities):
             on_stage("entity_training")
         entity_model = train_learned_entities(snapshot)

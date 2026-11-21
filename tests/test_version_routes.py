@@ -8,6 +8,7 @@ from dialogentis.db import unit_of_work
 from dialogentis.jobs.tasks import process_job
 from dialogentis.jobs.training_tasks import HANDLERS
 from dialogentis.models import Membership
+from dialogentis.nlu.settings import NLUSettings
 from dialogentis.versions.models import AgentVersion
 from tests.test_auth import client_for
 from tests.test_exports import app as app
@@ -124,7 +125,7 @@ async def test_settings_are_saved_in_version_and_applied_to_report(app):
         await populate(app, org_id, agent_id)
         base = f"/api/v1/organizations/{org_id}/agents/{agent_id}"
         draft = (await owner.get(f"{base}/draft")).json()
-        assert draft["config"]["nlu_settings"] == {"score": 0.55, "margin": 0.15, "similarity": 0.2}
+        assert draft["config"]["nlu_settings"] == NLUSettings().model_dump()
         grant = (await owner.post(f"{base}/edit-lease", json={"tab_id": str(uuid4())})).json()
         headers = {
             "X-Edit-Lease": grant["lease_token"],
@@ -132,7 +133,9 @@ async def test_settings_are_saved_in_version_and_applied_to_report(app):
             "If-Match": '"rev-1"',
         }
         body = {"schema_version": 1, "config": draft["config"]}
-        settings = {"score": 0.73, "margin": 0.25, "similarity": 0.31}
+        settings = NLUSettings(
+            score=0.73, margin=0.25, similarity=0.31, vocabulary_coverage=0.55, classifier_c=10
+        ).model_dump()
         quality = {"intent_f1": 0.9, "entity_f1": 0.75}
         body["config"]["nlu_settings"] = settings
         body["config"]["quality_settings"] = quality

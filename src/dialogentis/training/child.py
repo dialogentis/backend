@@ -14,7 +14,7 @@ from dialogentis.datasets.schema import Dataset
 from dialogentis.nlu.adapter import NLUAdapter
 from dialogentis.nlu.intent import Thresholds
 from dialogentis.nlu.model_store import ModelIdentity, pack_model
-from dialogentis.nlu.settings import QualitySettings
+from dialogentis.nlu.settings import NLUSettings, QualitySettings
 
 MAX_REQUEST_BYTES = 12 * 1024 * 1024
 MAX_REPORT_BYTES = 32 * 1024 * 1024
@@ -50,7 +50,8 @@ def main() -> None:
     dataset = Dataset.model_validate(
         {key: config[key] for key in ("intents", "entities", "examples")}
     )
-    thresholds = Thresholds(**snapshot["nlu_settings"])
+    nlu = NLUSettings.model_validate(snapshot["nlu_settings"])
+    thresholds = Thresholds.from_settings(nlu)
     quality = QualitySettings.model_validate(config.get("quality_settings", {}))
     identity = ModelIdentity(
         *(
@@ -58,7 +59,9 @@ def main() -> None:
             for key in ("organization_id", "agent_id", "version_id", "artifact_id")
         )
     )
-    adapter = NLUAdapter.train(identity.version_id, dataset, thresholds, on_stage=stage)
+    adapter = NLUAdapter.train(
+        identity.version_id, dataset, thresholds, on_stage=stage, classifier_c=nlu.classifier_c
+    )
     stage("evaluation")
     report = adapter.evaluate(dataset)
     example = next(item for item in dataset.examples if item.split == "train")

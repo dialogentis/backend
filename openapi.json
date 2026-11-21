@@ -22061,7 +22061,8 @@
                 "empty_features",
                 "low_score",
                 "ambiguous_intent",
-                "low_similarity"
+                "low_similarity",
+                "low_vocabulary_coverage"
               ]
             },
             "type": "array",
@@ -22725,6 +22726,20 @@
             "minimum": 0.0,
             "title": "Similarity",
             "default": 0.2
+          },
+          "vocabulary_coverage": {
+            "type": "number",
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Vocabulary Coverage",
+            "default": 0.0
+          },
+          "classifier_c": {
+            "type": "number",
+            "maximum": 100.0,
+            "minimum": 0.01,
+            "title": "Classifier C",
+            "default": 1.0
           }
         },
         "additionalProperties": false,

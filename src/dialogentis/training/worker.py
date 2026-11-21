@@ -23,6 +23,7 @@ from dialogentis.nlu.intent import Thresholds
 from dialogentis.nlu.intent import training_data_hash as intent_training_hash
 from dialogentis.nlu.learned_entities import training_data_hash as entity_training_hash
 from dialogentis.nlu.model_store import ModelIdentity, unpack_model
+from dialogentis.nlu.settings import NLUSettings
 from dialogentis.training.child import MAX_REPORT_BYTES, MAX_REQUEST_BYTES
 from dialogentis.versions.models import AgentVersion
 from dialogentis.versions.prepare import canonical_hash, nlu_hash
@@ -161,11 +162,14 @@ def verify_output(
     dataset = Dataset.model_validate(
         {key: config[key] for key in ("intents", "entities", "examples")}
     )
+    nlu = NLUSettings.model_validate(snapshot["nlu_settings"])
     learned = any(item.method == "learned" for item in dataset.entities)
     if (
         adapter.intent_model.manifest.get("training_data_sha256") != intent_training_hash(dataset)
         or adapter.entities != dataset.entities
-        or adapter.thresholds != Thresholds(**snapshot["nlu_settings"])
+        or adapter.thresholds != Thresholds.from_settings(nlu)
+        or adapter.intent_model.classifier.C != nlu.classifier_c
+        or adapter.intent_model.manifest.get("classifier_c") != nlu.classifier_c
         or (adapter.entity_model is not None) != learned
         or (
             adapter.entity_model is not None

@@ -2,7 +2,9 @@
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass
+from functools import cached_property
 from platform import python_version
 from typing import Literal
 from unicodedata import unidata_version
@@ -19,8 +21,20 @@ from sklearn.preprocessing import normalize
 
 from dialogentis.datasets.schema import Dataset, validate_dataset
 from dialogentis.datasets.validation import Issue
+from dialogentis.nlu.settings import NLUSettings
 
-FallbackReason = Literal["empty_features", "low_score", "ambiguous_intent", "low_similarity"]
+FallbackReason = Literal[
+    "empty_features", "low_score", "ambiguous_intent", "low_similarity", "low_vocabulary_coverage"
+]
+
+WORD = re.compile(r"[^\W\d_]+")
+COMMON_WORDS = frozenset(
+    """
+    а без был будет бы в во вы где да для до его её ее есть за и из или к как какая какие
+    какой каком какую ко ли мне можно мои мой моя мы на не но о об от по под подскажите
+    пожалуйста при с со так то у что это я
+    """.split()
+)
 
 
 @dataclass(frozen=True)
@@ -28,10 +42,18 @@ class Thresholds:
     score: float = 0.55
     margin: float = 0.15
     similarity: float = 0.20
+    vocabulary_coverage: float = 0.0
 
     def __post_init__(self) -> None:
-        if not all(0 <= value <= 1 for value in (self.score, self.margin, self.similarity)):
+        values = (self.score, self.margin, self.similarity, self.vocabulary_coverage)
+        if not all(0 <= value <= 1 for value in values):
             raise ValueError("NLU thresholds must be between 0 and 1")
+
+    @classmethod
+    def from_settings(cls, settings: NLUSettings) -> Thresholds:
+        return cls(
+            settings.score, settings.margin, settings.similarity, settings.vocabulary_coverage
+        )
 
 
 @dataclass(frozen=True)
@@ -68,6 +90,23 @@ class IntentModel:
     train_vectors: csr_matrix
     manifest: dict
 
+    @cached_property
+    def _word_prefixes(self) -> frozenset[str]:
+        vocabulary = self.vectorizer.named_transformers.word.vocabulary_
+        return frozenset(
+            token[:4]
+            for token in vocabulary
+            if len(token) >= 2 and " " not in token and token not in COMMON_WORDS
+        )
+
+    def vocabulary_coverage(self, text: str) -> float:
+        words = [
+            word
+            for word in WORD.findall(text.lower())
+            if len(word) >= 2 and word not in COMMON_WORDS
+        ]
+        return sum(word[:4] in self._word_prefixes for word in words) / max(1, len(words))
+
     def predict(self, text: str, thresholds: Thresholds | None = None) -> IntentPrediction:
         thresholds = thresholds or Thresholds()
         if len(text) > 2000:
@@ -95,6 +134,11 @@ class IntentModel:
             reasons.append("ambiguous_intent")
         if similarity < thresholds.similarity:
             reasons.append("low_similarity")
+        if (
+            thresholds.vocabulary_coverage
+            and self.vocabulary_coverage(text) < thresholds.vocabulary_coverage
+        ):
+            reasons.append("low_vocabulary_coverage")
         return IntentPrediction(ranking, similarity, tuple(reasons))
 
 
@@ -112,7 +156,7 @@ def training_data_hash(dataset: Dataset) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def train_intents(dataset: Dataset) -> IntentModel:
+def train_intents(dataset: Dataset, *, classifier_c: float = 1.0) -> IntentModel:
     errors, _ = validate_dataset(dataset)
     if errors:
         raise InvalidTrainingDataset(errors)
@@ -135,7 +179,7 @@ def train_intents(dataset: Dataset) -> IntentModel:
             "Training texts cannot produce the required word and character features"
         ) from exc
     classifier = LogisticRegression(
-        random_state=42, max_iter=1000, solver="lbfgs", C=1.0, tol=0.0001
+        random_state=42, max_iter=1000, solver="lbfgs", C=classifier_c, tol=0.0001
     )
     classifier.fit(train_vectors, [str(item.intent_id) for item in train])
     return IntentModel(
@@ -162,7 +206,7 @@ def train_intents(dataset: Dataset) -> IntentModel:
             "tfidf_sublinear_tf": False,
             "vector_normalization": "l2",
             "classifier_solver": "lbfgs",
-            "classifier_c": 1.0,
+            "classifier_c": classifier_c,
             "classifier_tolerance": 0.0001,
             "classifier_max_iter": 1000,
         },
