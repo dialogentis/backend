@@ -42,6 +42,13 @@ class ArtifactStorage:
         finally:
             os.close(descriptor)
 
+    def available(self) -> bool:
+        try:
+            with self._root() as root:
+                return os.access(".", os.R_OK | os.W_OK | os.X_OK, dir_fd=root)
+        except OSError:
+            return False
+
     @contextmanager
     def _tenant(self, organization_id: UUID, *, create: bool = False) -> Generator[int]:
         if not isinstance(organization_id, UUID):

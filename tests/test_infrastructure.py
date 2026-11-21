@@ -20,7 +20,7 @@ pytestmark = [
 ]
 
 
-async def test_database_and_api_readiness():
+async def test_database_and_api_readiness(tmp_path, monkeypatch):
     config = Settings()
     assert config.database_url is not None
     async with await psycopg.AsyncConnection.connect(
@@ -31,6 +31,32 @@ async def test_database_and_api_readiness():
     with TestClient(create_app(config)) as client:
         response = client.get("/api/health/ready")
         assert response.status_code == 200, response.json()
+        assert response.json()["checks"] == {
+            "database": "ok",
+            "schema_revision": "ok",
+            "artifacts": "ok",
+        }
+    with TestClient(create_app(config.model_copy(update={"broker_url": None}))) as client:
+        assert client.get("/api/health/ready").status_code == 200
+    with TestClient(
+        create_app(config.model_copy(update={"artifact_root": tmp_path / "missing"}))
+    ) as client:
+        result = client.get("/api/health/ready")
+        assert result.status_code == 503
+        assert result.json()["checks"] == {
+            "database": "ok",
+            "schema_revision": "ok",
+            "artifacts": "unavailable",
+        }
+    monkeypatch.setattr("dialogentis.health.expected_schema", lambda: "incompatible")
+    with TestClient(create_app(config)) as client:
+        result = client.get("/api/health/ready")
+        assert result.status_code == 503
+        assert result.json()["checks"] == {
+            "database": "ok",
+            "schema_revision": "unavailable",
+            "artifacts": "ok",
+        }
 
 
 async def test_taskiq_rabbitmq_manual_ack(tmp_path: Path):

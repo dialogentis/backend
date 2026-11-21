@@ -17833,7 +17833,9 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/RuntimeReadiness"
+                }
               }
             }
           },
@@ -17952,7 +17954,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
+                  "$ref": "#/components/schemas/RuntimeReadiness"
                 }
               }
             }
@@ -19069,6 +19071,13 @@
           "replay_available"
         ],
         "title": "ChatView"
+      },
+      "Check": {
+        "type": "string",
+        "enum": [
+          "ok",
+          "unavailable"
+        ]
       },
       "ClassMetrics": {
         "properties": {
@@ -23061,6 +23070,24 @@
         ],
         "title": "RollbackInput"
       },
+      "RuntimeChecks": {
+        "properties": {
+          "database": {
+            "$ref": "#/components/schemas/Check",
+            "default": "unavailable"
+          },
+          "schema_revision": {
+            "$ref": "#/components/schemas/Check",
+            "default": "unavailable"
+          },
+          "artifacts": {
+            "$ref": "#/components/schemas/Check",
+            "default": "unavailable"
+          }
+        },
+        "type": "object",
+        "title": "RuntimeChecks"
+      },
       "RuntimeMessageInput": {
         "properties": {
           "client_message_id": {
@@ -23082,6 +23109,33 @@
           "text"
         ],
         "title": "RuntimeMessageInput"
+      },
+      "RuntimeReadiness": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "ready",
+              "unavailable"
+            ],
+            "title": "Status"
+          },
+          "checks": {
+            "$ref": "#/components/schemas/RuntimeChecks"
+          },
+          "request_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Request Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "checks",
+          "request_id"
+        ],
+        "title": "RuntimeReadiness"
       },
       "RuntimeStatus": {
         "type": "string",

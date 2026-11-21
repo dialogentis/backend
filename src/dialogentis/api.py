@@ -2,13 +2,10 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
-from uuid import uuid4
+from uuid import UUID, uuid4
 
-import aio_pika
-import psycopg
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Response
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException
 
 from dialogentis.agents import router as agents_router
@@ -30,6 +27,7 @@ from dialogentis.db import session_factory
 from dialogentis.deletions import router as deletions_router
 from dialogentis.drafts import router as drafts_router
 from dialogentis.flow_routes import router as flow_router
+from dialogentis.health import RuntimeReadiness, runtime_checks
 from dialogentis.integrations.routes import router as integrations_router
 from dialogentis.organizations import router as organizations_router
 from dialogentis.runtime.executor import RuntimeExecutor
@@ -161,37 +159,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def liveness() -> dict[str, str]:
         return {"status": "ok"}
 
-    @app.get("/api/health/ready", tags=["health"])
-    async def readiness(request: Request):
-        checks = {"database": "unavailable", "broker": "unavailable"}
-        if config.database_url:
-            try:
-                async with asyncio.timeout(3):
-                    async with await psycopg.AsyncConnection.connect(
-                        config.database_url.get_secret_value().replace(
-                            "postgresql+psycopg", "postgresql"
-                        )
-                    ) as connection:
-                        await connection.execute("SELECT 1")
-                checks["database"] = "ok"
-            except TimeoutError, psycopg.Error:
-                pass
-        if config.broker_url:
-            try:
-                async with asyncio.timeout(3):
-                    connection = await aio_pika.connect(config.broker_url.get_secret_value())
-                    await connection.close()
-                checks["broker"] = "ok"
-            except TimeoutError, ConnectionError, OSError:
-                pass
-        ready = all(value == "ok" for value in checks.values())
-        return JSONResponse(
-            status_code=200 if ready else 503,
-            content={
-                "status": "ready" if ready else "unavailable",
-                "checks": checks,
-                "request_id": request.state.request_id,
-            },
+    @app.get(
+        "/api/health/ready",
+        tags=["health"],
+        response_model=RuntimeReadiness,
+        responses={503: {"model": RuntimeReadiness}},
+    )
+    async def readiness(request: Request, response: Response) -> RuntimeReadiness:
+        checks = await runtime_checks(config)
+        ready = checks.database == checks.schema_revision == checks.artifacts == "ok"
+        response.status_code = 200 if ready else 503
+        return RuntimeReadiness(
+            status="ready" if ready else "unavailable",
+            checks=checks,
+            request_id=UUID(request.state.request_id),
         )
 
     return app
