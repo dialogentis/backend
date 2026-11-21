@@ -1,0 +1,36 @@
+# Match the production service limits while keeping Mailpit and the loopback proxy.
+x-small: &small
+  cpus: 1
+  mem_limit: 512m
+  pids_limit: 128
+
+services:
+  frontend: *small
+  postgres:
+    cpus: 2
+    mem_limit: 2g
+    shm_size: 128m
+    pids_limit: 256
+  rabbitmq:
+    cpus: 2
+    mem_limit: 2g
+    pids_limit: 512
+  api:
+    environment:
+      WEB_CONCURRENCY: "2"
+    cpus: 4
+    mem_limit: 4g
+    pids_limit: 256
+    ports: !reset []
+  training-worker:
+    pids_limit: 256
+  worker:
+    <<: *small
+    mem_limit: 1g
+  maintenance-worker: *small
+  runtime-watchdog: *small
+  mailer: *small
+  dispatcher: *small
+  scheduler: *small
+  migrate: *small
+  deletion-replay: *small
