@@ -19,11 +19,27 @@ docker compose --profile dev up --build -d
 - Кабинет и API через Caddy: http://localhost:18080
 - OpenAPI UI: http://localhost:18080/api/docs
 - Liveness: http://localhost:18080/api/health/live
-- Readiness (реальные подключения к БД и RabbitMQ): http://localhost:18080/api/health/ready
+- Readiness проверяет БД, схему и артефакты на http://localhost:18080/api/health/ready. Состояние RabbitMQ и рабочих процессов показывает очередь на странице «Обзор».
 - API напрямую для разработки: http://localhost:18000
 - Почтовый интерфейс Mailpit: http://localhost:18025
 
-Миграции выполняются отдельным одноразовым сервисом до запуска API, не каждым worker. Приложение работает под `dialogentis_app`, миграции — под `dialogentis_migrator`; bootstrap superuser не передаётся приложению. Одноразовый `dispatcher-init` создаёт ограниченную роль диспетчера и её случайный пароль в отдельном Docker volume, недоступном API; он также поддерживает существующую базу при обновлении. Для миграций вне Compose роль диспетчера необходимо предварительно создать от имени администратора БД. PostgreSQL и RabbitMQ не публикуют порты на хост. HTTP-порты привязаны только к loopback. Production-образы запускают приложения без root; HTTPS и внешняя конфигурация production потребуют следующего эксплуатационного этапа.
+Миграции выполняются отдельным одноразовым сервисом до запуска API. Приложение работает под `dialogentis_app`, миграции — под `dialogentis_migrator`. Bootstrap superuser недоступен приложению. Одноразовый `dispatcher-init` создаёт ограниченную роль диспетчера и её случайный пароль в отдельном Docker volume, недоступном API. Для миграций вне Compose роль диспетчера необходимо предварительно создать от имени администратора БД. PostgreSQL и RabbitMQ не публикуют порты на хост. Порты локальной разработки привязаны к loopback.
+
+## Production
+
+На Linux-сервере подготовьте публичное имя, DNS-записи и доступ к портам TCP 80 и 443. Для новой установки создайте отдельный файл параметров.
+
+```sh
+uv run --locked python scripts/init_env.py --output .env.production
+```
+
+В `.env.production` задайте `PUBLIC_HOST` без схемы и порта, `SMTP_HOST`, `SMTP_PORT=587` и `SMTP_FROM`. Для SMTP с аутентификацией задайте одновременно `SMTP_USER` и `SMTP_PASSWORD`. Ретранслятор должен поддерживать STARTTLS. Compose формирует публичный адрес `https://PUBLIC_HOST` из имени.
+
+```sh
+docker compose --env-file .env.production -f compose.yaml -f compose.production.yaml up --build -d --wait
+```
+
+Caddy получает сертификат и перенаправляет HTTP на HTTPS. Только Caddy публикует порты. Он и процессы приложения работают без root. Данные PostgreSQL, RabbitMQ, артефактов, журнала удалений и Caddy находятся в отдельных томах. Ограничения ресурсов заданы в `compose.production.yaml`; значения проверяются под нагрузкой на этапе S15.
 
 ## Разработка с hot reload
 
@@ -121,4 +137,4 @@ curl -fsS -X POST "$BASE_URL/conversations/$CONVERSATION_ID/messages" \
 docker compose --profile dev --profile test down
 ```
 
-Volumes сохраняются. Удаление volumes не является обычным обновлением: там находится БД. Backup/restore и production runbook ещё не реализованы и относятся к S15–S16.
+Volumes сохраняются. При обычном обновлении сохраняйте тома базы и данных. Проверяемая процедура резервного копирования и восстановления готовится на этапе S14.

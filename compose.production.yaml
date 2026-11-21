@@ -1,0 +1,85 @@
+x-production-env: &production-env
+  APP_ENV: production
+  PUBLIC_BASE_URL: https://${PUBLIC_HOST:?Set the public hostname}
+  SMTP_HOST: ${SMTP_HOST:?Set the SMTP server}
+  SMTP_PORT: ${SMTP_PORT:-587}
+  SMTP_FROM: ${SMTP_FROM:?Set the sender address}
+
+x-app-limits: &app-limits
+  cpus: 1
+  mem_limit: 512m
+  pids_limit: 128
+
+services:
+  frontend:
+    <<: *app-limits
+    environment:
+      PUBLIC_HOST: ${PUBLIC_HOST:?Set the public hostname}
+      XDG_DATA_HOME: /var/lib/dialogentis-caddy/data
+      XDG_CONFIG_HOME: /var/lib/dialogentis-caddy/config
+    ports: !override ["80:8080", "443:8443"]
+    volumes:
+      - ./ops/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/var/lib/dialogentis-caddy/data
+      - caddy-config:/var/lib/dialogentis-caddy/config
+    restart: unless-stopped
+
+  postgres:
+    cpus: 2
+    mem_limit: 2g
+    shm_size: 128m
+    pids_limit: 256
+    restart: unless-stopped
+
+  rabbitmq:
+    cpus: 2
+    mem_limit: 2g
+    pids_limit: 512
+    restart: unless-stopped
+
+  api:
+    environment: *production-env
+    cpus: 4
+    mem_limit: 4g
+    pids_limit: 256
+    ports: !reset []
+    restart: unless-stopped
+
+  worker:
+    <<: *app-limits
+    environment: *production-env
+    mem_limit: 1g
+
+  training-worker:
+    environment: *production-env
+    pids_limit: 256
+
+  maintenance-worker:
+    <<: *app-limits
+    environment: *production-env
+
+  runtime-watchdog:
+    <<: *app-limits
+    environment: *production-env
+
+  mailer:
+    <<: *app-limits
+    environment: *production-env
+
+  dispatcher:
+    <<: *app-limits
+
+  scheduler:
+    <<: *app-limits
+
+  migrate:
+    <<: *app-limits
+    environment: *production-env
+
+  deletion-replay:
+    <<: *app-limits
+    environment: *production-env
+
+volumes:
+  caddy-data:
+  caddy-config:

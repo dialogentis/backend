@@ -1,5 +1,7 @@
 """Generate an ignored local configuration; refuse to overwrite existing credentials."""
 
+import argparse
+import os
 from pathlib import Path
 from secrets import token_hex
 
@@ -7,6 +9,9 @@ from cryptography.fernet import Fernet
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--output", type=Path, default=Path(".env"))
+    target = parser.parse_args().output
     admin, migration, app, broker = (token_hex(24) for _ in range(4))
     values = {
         "APP_ENV": "development",
@@ -30,12 +35,10 @@ def main() -> None:
         "SMTP_PORT": "1025",
         "SMTP_FROM": "no-reply@localhost",
     }
-    target = Path(".env")
-    descriptor = target.open("x")
-    target.chmod(0o600)
-    with descriptor:
-        descriptor.write("".join(f"{key}={value}\n" for key, value in values.items()))
-    print("Created .env (mode 0600). Values are intentionally not printed.")
+    descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(descriptor, "w") as output:
+        output.write("".join(f"{key}={value}\n" for key, value in values.items()))
+    print(f"Created {target} (mode 0600).")
 
 
 if __name__ == "__main__":

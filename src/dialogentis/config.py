@@ -1,10 +1,15 @@
+import re
+from email.utils import parseaddr
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlsplit
 
 from cryptography.fernet import Fernet
 from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+DNS_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
 
 
 class Settings(BaseSettings):
@@ -24,7 +29,7 @@ class Settings(BaseSettings):
     temporary_artifact_quota_bytes: int = Field(default=100 * 1024**2, gt=0)
     deletion_journal_root: Path = Path("deletion-journal")
     smtp_host: str | None = None
-    smtp_port: int = 1025
+    smtp_port: int = Field(default=1025, ge=1, le=65535)
     smtp_user: str | None = None
     smtp_password: SecretStr | None = None
     smtp_from: str = "Dialogentis <no-reply@localhost>"
@@ -50,14 +55,34 @@ class Settings(BaseSettings):
                 raise ValueError(
                     "Production requires database, broker, session, encryption and SMTP"
                 )
-            if not self.public_base_url.startswith("https://"):
-                raise ValueError("Production PUBLIC_BASE_URL must use HTTPS")
+            origin = urlsplit(self.public_base_url)
+            hostname = origin.hostname
+            if (
+                origin.scheme != "https"
+                or hostname is None
+                or origin.netloc != hostname
+                or len(hostname) > 253
+                or "." not in hostname
+                or not all(DNS_LABEL.fullmatch(label) for label in hostname.split("."))
+                or origin.path
+                or origin.query
+                or origin.fragment
+                or self.public_base_url != f"https://{hostname}"
+            ):
+                raise ValueError("Production PUBLIC_BASE_URL must be a canonical HTTPS origin")
             if self.session_secret and len(self.session_secret.get_secret_value()) < 32:
                 raise ValueError("SESSION_SECRET must contain at least 32 characters")
             if not self.artifact_root.is_absolute():
                 raise ValueError("Production ARTIFACT_ROOT must be absolute")
             if not self.deletion_journal_root.is_absolute():
                 raise ValueError("Production DELETION_JOURNAL_ROOT must be absolute")
+            if self.smtp_host == "mailpit" or parseaddr(self.smtp_from)[1].endswith("@localhost"):
+                raise ValueError("Production requires an explicit SMTP server and sender")
+            sender = parseaddr(self.smtp_from)[1]
+            if not sender or "@" not in sender:
+                raise ValueError("SMTP_FROM must contain a sender email address")
+            if bool(self.smtp_user) != bool(self.smtp_password):
+                raise ValueError("SMTP_USER and SMTP_PASSWORD must be set together")
         return self
 
 

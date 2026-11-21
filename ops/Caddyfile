@@ -1,0 +1,25 @@
+{
+	http_port 8080
+	https_port 8443
+	auto_https disable_redirects
+}
+
+http://{$PUBLIC_HOST}:8080 {
+	redir https://{$PUBLIC_HOST}{uri} 308
+}
+
+https://{$PUBLIC_HOST}:8443 {
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options nosniff
+		Referrer-Policy no-referrer
+	}
+	handle /api/* {
+		reverse_proxy api:8000
+	}
+	handle {
+		root * /usr/share/caddy
+		try_files {path} /index.html
+		file_server
+	}
+}
