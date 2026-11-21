@@ -16,6 +16,7 @@ from dialogentis.runtime.history_context import (
 from dialogentis.runtime.history_filters import history_cutoff
 from dialogentis.runtime.history_models import ConversationHistory, HistoryTurn
 from dialogentis.runtime.models import TestConversation
+from dialogentis.runtime.receipt_models import RuntimeReceipt
 from dialogentis.runtime.receipts import ReceiptIdentity, ReceiptPayload, open_receipt, seal_receipt
 
 PURPOSE = b"conversation-history-aes256gcm"
@@ -133,7 +134,13 @@ async def load_dialogue_context(
     return recent_history(newest_first())
 
 
-async def cleanup_history(db: AsyncSession, org: Organization, *, purge_text: bool = False) -> None:
+async def cleanup_history(
+    db: AsyncSession,
+    org: Organization,
+    *,
+    purge_text: bool = False,
+    retention_cutoff: datetime | None = None,
+) -> None:
     if purge_text:
         await db.execute(
             update(HistoryTurn)
@@ -142,7 +149,11 @@ async def cleanup_history(db: AsyncSession, org: Organization, *, purge_text: bo
             )
             .values(encrypted_messages=None)
         )
-    cutoff = func.now() - timedelta(days=org.retention_days)
+    cutoff = (
+        retention_cutoff
+        if retention_cutoff is not None
+        else func.now() - timedelta(days=org.retention_days)
+    )
     await db.execute(
         delete(HistoryTurn).where(
             HistoryTurn.organization_id == org.id,
@@ -155,3 +166,21 @@ async def cleanup_history(db: AsyncSession, org: Organization, *, purge_text: bo
             ConversationHistory.last_activity_at <= cutoff,
         )
     )
+
+
+async def apply_history_policy(
+    db: AsyncSession,
+    org: Organization,
+    *,
+    retention_cutoff: datetime | None,
+    purge_text: bool,
+) -> None:
+    if retention_cutoff is None:
+        return
+    receipts = update(RuntimeReceipt).where(
+        RuntimeReceipt.organization_id == org.id, RuntimeReceipt.encrypted_response.is_not(None)
+    )
+    if not purge_text:
+        receipts = receipts.where(RuntimeReceipt.created_at <= retention_cutoff)
+    await db.execute(receipts.values(encrypted_response=None))
+    await cleanup_history(db, org, purge_text=purge_text, retention_cutoff=retention_cutoff)

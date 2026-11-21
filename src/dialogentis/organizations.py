@@ -1,3 +1,4 @@
+import asyncio
 import json
 import secrets
 from datetime import UTC, datetime, timedelta
@@ -16,7 +17,6 @@ from sqlalchemy import (
     func,
     select,
     text,
-    update,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.exc import IntegrityError
@@ -25,10 +25,10 @@ from sqlalchemy.orm import Mapped, mapped_column
 from dialogentis.auth.models import EmailOutbox
 from dialogentis.auth.security import VerifiedUser, check_password, digest, rate_limit
 from dialogentis.contracts import CursorPage, InputModel, revision_etag
+from dialogentis.deletion_journal import HistoryPolicyMarker, write_history_policy
 from dialogentis.dependencies import Database
 from dialogentis.models import Base, Membership, Organization, User
-from dialogentis.runtime.history import cleanup_history
-from dialogentis.runtime.receipt_models import RuntimeReceipt
+from dialogentis.runtime.history import apply_history_policy
 
 router = APIRouter(prefix="/api/v1", tags=["organizations"])
 Role = Literal["admin", "editor", "viewer"]
@@ -311,6 +311,7 @@ async def get_organization(org_id: UUID, user: VerifiedUser, db: Database, respo
 async def update_organization(
     org_id: UUID,
     body: OrganizationPatch,
+    request: Request,
     user: VerifiedUser,
     db: Database,
     response: Response,
@@ -329,27 +330,13 @@ async def update_organization(
         org.retention_days = body.history_retention_days
     if body.store_message_text is not None:
         org.store_message_text = body.store_message_text
-    if body.purge_existing_text:
-        await db.execute(
-            update(RuntimeReceipt)
-            .where(
-                RuntimeReceipt.organization_id == org_id,
-                RuntimeReceipt.encrypted_response.is_not(None),
-            )
-            .values(encrypted_response=None)
-        )
-    elif body.history_retention_days is not None:
-        await db.execute(
-            update(RuntimeReceipt)
-            .where(
-                RuntimeReceipt.organization_id == org_id,
-                RuntimeReceipt.encrypted_response.is_not(None),
-                RuntimeReceipt.created_at <= func.now() - timedelta(days=org.retention_days),
-            )
-            .values(encrypted_response=None)
-        )
+    retention_cutoff = None
     if body.purge_existing_text or body.history_retention_days is not None:
-        await cleanup_history(db, org, purge_text=bool(body.purge_existing_text))
+        retention_cutoff = await db.scalar(select(func.now() - timedelta(days=org.retention_days)))
+        assert retention_cutoff is not None
+        await apply_history_policy(
+            db, org, retention_cutoff=retention_cutoff, purge_text=body.purge_existing_text
+        )
     org.settings_revision += 1
     details = body.model_dump(
         include={"history_retention_days", "store_message_text"}, exclude_none=True
@@ -358,6 +345,21 @@ async def update_organization(
         details["purge_existing_text"] = True
     audit(db, org_id, user, "organization.settings_changed", org_id, details=details)
     await db.flush()
+    if details:
+        marker = HistoryPolicyMarker(
+            organization_id=org.id,
+            revision=org.settings_revision,
+            retention_days=org.retention_days,
+            store_message_text=org.store_message_text,
+            retention_cutoff=retention_cutoff,
+            purge_text=body.purge_existing_text,
+        )
+        try:
+            await asyncio.to_thread(
+                write_history_policy, request.app.state.settings.deletion_journal_root, marker
+            )
+        except OSError as exc:
+            raise HTTPException(503, "Журнал удаления временно недоступен") from exc
     response.headers["ETag"] = revision_etag(org.settings_revision)
     return {**org_json(org), "role": membership.role}
 

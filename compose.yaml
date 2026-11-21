@@ -94,7 +94,7 @@ services:
     depends_on:
       deletion-replay: {condition: service_completed_successfully}
     ports: ['127.0.0.1:18000:8000']
-    volumes: [artifacts:/app/artifacts]
+    volumes: [artifacts:/app/artifacts, deletion-journal:/app/deletion-journal]
     healthcheck:
       test: [CMD, /app/.venv/bin/python, -c, "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health/ready')"]
       interval: 10s
