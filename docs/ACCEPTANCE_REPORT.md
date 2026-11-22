@@ -4,6 +4,7 @@
 
 ## Воспроизведение
 
+- Совместная проверка. Из backend после первого запуска `CHROME_PATH=/absolute/path/to/chromium make acceptance` проверяет оба репозитория и запускает инсталляцию для браузерных сценариев на свободных портах 18100, 18125 и 18180.
 - Сервер и контракт. Из backend запустите `make integration`. Для вспомогательных проверок используются `uv run --locked ruff check`, `uv run --locked ty check` и генерация OpenAPI из `scripts/export_openapi.py`. Команды CI описаны в [.github/workflows/backend.yml](../.github/workflows/backend.yml).
 - Кабинет и контракт клиента. Из frontend запустите `npm ci`, `npm run typecheck`, `npm run test:unit`, `npm run build` и `npm run api:generate`. Сценарии Chrome с реальной базой и очередью описаны в [инструкции frontend](../../frontend/README.md#проверки).
 - Развёртывание, резервное копирование и восстановление. Используйте [инструкцию эксплуатации](OPERATIONS.md) и раздел Production в [README](../README.md#production).
