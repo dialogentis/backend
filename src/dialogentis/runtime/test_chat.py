@@ -51,7 +51,7 @@ from dialogentis.runtime.idempotency import (
     reserve_initial_turn,
     reserve_message,
 )
-from dialogentis.runtime.limits import run_limited
+from dialogentis.runtime.limits import SLOT_COUNT, run_limited
 from dialogentis.runtime.live_http import LiveHttpTurn
 from dialogentis.runtime.models import TestConversation
 from dialogentis.runtime.rate_limits import limit_api_turn, limit_widget_turn
@@ -108,6 +108,7 @@ class TestChatService:
         self.factory = factory
         self.settings = settings
         self.executor = executor
+        self._runtime_slots = asyncio.BoundedSemaphore(SLOT_COUNT)
         self._pending: set[asyncio.Task[ChatResponse]] = set()
         self._closing = False
 
@@ -238,7 +239,7 @@ class TestChatService:
             )
 
         try:
-            async with asyncio.timeout(20):
+            async with asyncio.timeout(20), self._runtime_slots:
                 return await run_limited(self.factory, work)
         except TimeoutError:
             raise ExecutionError("runtime_timeout") from None
@@ -482,7 +483,7 @@ class TestChatService:
             )
 
         try:
-            async with asyncio.timeout(20):
+            async with asyncio.timeout(20), self._runtime_slots:
                 return await run_limited(self.factory, work)
         except TimeoutError:
             raise ExecutionError("runtime_request_timeout") from None

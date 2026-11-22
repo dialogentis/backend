@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from dialogentis.api import create_app
 from dialogentis.config import Settings
 from dialogentis.runtime.executor import RuntimeExecutor
+from dialogentis.runtime.limits import SLOT_COUNT
 from dialogentis.runtime.test_chat import ChatResponse
 from dialogentis.runtime.test_chat import TestChatService as ChatService
 
@@ -79,3 +80,34 @@ async def test_shutdown_cancels_turn_after_timeout(monkeypatch):
     assert stopped.is_set() and not service._pending
     with pytest.raises(asyncio.CancelledError):
         await caller
+
+
+async def test_runtime_admission_limits_waiters_before_database_slot_polling(monkeypatch):
+    service = ChatService(
+        cast(async_sessionmaker[AsyncSession], None), Settings(), RuntimeExecutor()
+    )
+    release = asyncio.Event()
+    first_wave = asyncio.Event()
+    attempted = 0
+    reply = ChatResponse(uuid4(), 1, "waiting_input", (), ())
+
+    async def poll_slot(*args):
+        nonlocal attempted
+        attempted += 1
+        if attempted == SLOT_COUNT:
+            first_wave.set()
+        await release.wait()
+        return reply
+
+    monkeypatch.setattr("dialogentis.runtime.test_chat.run_limited", poll_slot)
+    ids = [uuid4() for _ in range(4)]
+    async with asyncio.TaskGroup() as group:
+        tasks = [group.create_task(service.start(*ids)) for _ in range(SLOT_COUNT * 4)]
+        try:
+            await asyncio.wait_for(first_wave.wait(), 1)
+            assert attempted == SLOT_COUNT
+        finally:
+            release.set()
+    assert [task.result() for task in tasks] == [reply] * len(tasks)
+    assert attempted == len(tasks)
+    await service.shutdown()
