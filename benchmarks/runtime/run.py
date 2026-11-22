@@ -7,8 +7,9 @@ import math
 from collections import Counter
 from copy import deepcopy
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
-from time import perf_counter
+from time import perf_counter, time
 from uuid import uuid4
 
 import httpx
@@ -82,12 +83,15 @@ async def send(client: httpx.AsyncClient, conversation: tuple[str, dict], sample
 
 async def traffic(client, conversations, rate, begin, duration, samples):
     clock = asyncio.get_running_loop()
+    wall_offset = time() - clock.time()
     scheduled = duration * rate
     pending = [None] * len(conversations)
     async with asyncio.TaskGroup() as tasks:
         for index in range(scheduled):
             when = begin + index / rate
             await asyncio.sleep(max(0, when - clock.time()))
+            if abs(time() - clock.time() - wall_offset) >= 5 or clock.time() - when >= 5:
+                raise RuntimeError("Measurement interrupted by a clock jump or host suspension")
             dialog = index % len(conversations)
             previous = pending[dialog]
             if clock.time() >= when + 1 / rate:
@@ -140,10 +144,12 @@ async def background_training(client, agent, stop, windows):
 
 
 async def profile(public, admin, agents, training, rate, warm, duration, dialogs):
+    label = "with_training" if training else "baseline"
     conversations = [await start(public, agent) for _ in range(dialogs) for agent in agents]
     stop = asyncio.Event()
     windows = []
     warm_samples, messages, gets = Samples(), Samples(), Samples()
+    close_errors = Counter()
     clock = asyncio.get_running_loop()
     try:
         async with asyncio.TaskGroup() as tasks:
@@ -153,6 +159,8 @@ async def profile(public, admin, agents, training, rate, warm, duration, dialogs
             await traffic(public, conversations, rate, begin, warm, warm_samples)
             await asyncio.sleep(max(0, begin + warm - clock.time()))
             measured_begin = clock.time()
+            measurement_timestamp = datetime.now(UTC).isoformat()
+            print(f"Measuring {label} at {measurement_timestamp}", flush=True)
             try:
                 tasks.create_task(cabinet(admin, agents, measured_begin, duration, gets))
                 await traffic(public, conversations, rate, measured_begin, duration, messages)
@@ -160,7 +168,12 @@ async def profile(public, admin, agents, training, rate, warm, duration, dialogs
                 stop.set()
     finally:
         for path, auth in conversations:
-            check(await public.post(f"{path}/close", headers=auth), 204)
+            try:
+                response = await public.post(f"{path}/close", headers=auth)
+                if response.status_code != 204:
+                    close_errors[f"http_{response.status_code}"] += 1
+            except httpx.RequestError as exc:
+                close_errors[type(exc).__name__] += 1
     measured_end = measured_begin + duration
     overlap = sum(
         max(0, min(end, measured_end) - max(begin, measured_begin)) for begin, end in windows
@@ -170,14 +183,16 @@ async def profile(public, admin, agents, training, rate, warm, duration, dialogs
         "runtime": messages.report(),
         "cabinet_gets": gets.report(),
         "warmup": warm_samples.report(),
+        "measurement_started_at": measurement_timestamp,
         "warmup_seconds": warm,
         "measurement_seconds": duration,
         "messages_per_second": rate,
         "active_dialogs": len(conversations),
         "observed_training_jobs_during_measurement": overtime,
         "observed_running_seconds_lower_bound": round(overlap, 1),
+        "dialog_close_errors": dict(close_errors),
     }
-    print(json.dumps({"training" if training else "baseline": report}), flush=True)
+    print(json.dumps({label: report}), flush=True)
     return report
 
 
@@ -259,6 +274,12 @@ async def main(args):
     assert len({agent["id"] for agent in agents}) == len(agents)
     rate, warm, duration, dialogs = (2, 3, 10, 4) if smoke else (10, 120, 900, 10)
     report = {"smoke": smoke, "models": len(agents), "organizations": len(active)}
+
+    def write_report():
+        temporary = args.report.with_name(f"{args.report.name}.tmp")
+        temporary.write_text(json.dumps(report, indent=2) + "\n")
+        temporary.replace(args.report)
+
     async with (
         httpx.AsyncClient(base_url=url, timeout=30) as public,
         httpx.AsyncClient(base_url=url, headers={"Origin": url}, timeout=45) as admin,
@@ -276,15 +297,18 @@ async def main(args):
                     str(exc) if isinstance(exc, RuntimeError) else type(exc).__name__
                 ] += 1
         report["cold_model_start"] = cold_samples.report()
+        write_report()
         print(json.dumps({"cold_model_start": report["cold_model_start"]}), flush=True)
         report["baseline"] = await profile(
             public, admin, active, None, rate, warm, duration, dialogs
         )
+        write_report()
         report["with_training"] = await profile(
             public, admin, active, cold[0], rate, warm, duration, dialogs
         )
+        write_report()
         report["draft_saves"] = await measure_saves(admin, active[0], 1 if smoke else 20)
-    args.report.write_text(json.dumps(report, indent=2) + "\n")
+    write_report()
     print(json.dumps({"draft_saves": report["draft_saves"]}), flush=True)
 
 

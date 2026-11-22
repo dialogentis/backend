@@ -26,6 +26,7 @@ from dialogentis.runtime.history_models import ConversationHistory, HistoryTurn
 from dialogentis.runtime.models import TestConversation as ConversationRecord
 from dialogentis.runtime.receipt_models import RuntimeReceipt
 from dialogentis.runtime.watchdog import recover_once
+from tests.runtime_restart import assert_restart_keeps_post_single
 from tests.test_auth import client_for
 from tests.test_exports import app as app
 from tests.test_runtime_core import edge, node
@@ -378,6 +379,15 @@ async def test_mock_and_live_http_actions_use_organization_policy(app, monkeypat
         for path in (app.state.settings.artifact_root / str(org_id)).iterdir():
             if path.is_file():
                 assert marker.encode() not in path.read_bytes()
+
+        timeout_next = False
+        restart_chat = await owner.post(
+            start_url, json=body, headers={"Idempotency-Key": "api-restart-chat"}
+        )
+        assert restart_chat.status_code == 201 and restart_chat.json()["status"] == "waiting_input"
+        await assert_restart_keeps_post_single(
+            app.state.session_factory, owner, org_id, restart_chat.json()
+        )
         disabled = await owner.patch(
             f"{integrations}/{created.json()['id']}",
             json={"enabled": False},

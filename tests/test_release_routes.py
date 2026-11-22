@@ -17,6 +17,7 @@ from dialogentis.organizations import AuditEvent
 from dialogentis.runtime.history_models import ConversationHistory, HistoryTurn
 from dialogentis.runtime.rate_limits import RateBucket
 from dialogentis.runtime.receipt_models import RuntimeReceipt
+from dialogentis.training import worker as training_worker
 from dialogentis.versions.release_models import Release, ReleaseVersion
 from tests.test_auth import client_for
 from tests.test_exports import app as app
@@ -30,7 +31,7 @@ pytestmark = [
 ]
 
 
-async def test_release_gates_atomic_publication_pins_and_rollback(app):
+async def test_release_gates_atomic_publication_pins_and_rollback(app, monkeypatch):
     async with client_for(app) as owner, client_for(app) as editor, client_for(app) as public:
         owner_id, org_id, root_id = await create_agent(app, owner)
         editor_id, other_org, _ = await create_agent(app, editor)
@@ -46,7 +47,7 @@ async def test_release_gates_atomic_publication_pins_and_rollback(app):
         root, target, _, _, handoff, _ = call_flows()
         root["slots"][2]["sensitive"] = True
 
-        async def train(agent_id, flow_config, revision, *, minimum=True):
+        async def prepare_training(agent_id, flow_config, revision, *, minimum=True):
             data = training_dataset().model_dump(mode="json")
             if minimum:
                 data["examples"] = [
@@ -74,11 +75,18 @@ async def test_release_gates_atomic_publication_pins_and_rollback(app):
                     "slots": flow_config["slots"],
                 }
                 draft.revision = revision
-            prepared = await prepare(app, owner_id, org_id, agent_id, revision, uuid4().hex)
+            return (await prepare(app, owner_id, org_id, agent_id, revision, uuid4().hex)).version
+
+        async def build(version):
             await process_job(
-                app.state.session_factory, prepared.version.job_id, org_id, HANDLERS, "training"
+                app.state.session_factory, version.job_id, org_id, HANDLERS, "training"
             )
-            return prepared.version.id
+            return version.id
+
+        async def train(agent_id, flow_config, revision, *, minimum=True):
+            return await build(
+                await prepare_training(agent_id, flow_config, revision, minimum=minimum)
+            )
 
         async def start(version_id):
             response = await owner.post(
@@ -198,13 +206,6 @@ async def test_release_gates_atomic_publication_pins_and_rollback(app):
                 headers={**auth, "Idempotency-Key": "wrong-agent"},
             )
         ).status_code == 404
-        public_started = await start_public("first-public")
-        assert public_started.status_code == 201, public_started.text
-        original = public_started.json()
-        assert original["release_id"] == release_a["id"]
-        assert [message["text"] for message in original["messages"]] == ["Где заказ 321?"]
-        assert "trace" not in original and "revision" not in original
-
         # Publish a root version that no longer calls the target.
         root["flow"]["edges"][0]["target"] = root["flow"]["nodes"][3]["id"]
         root["flow"]["nodes"] = [
@@ -213,7 +214,38 @@ async def test_release_gates_atomic_publication_pins_and_rollback(app):
         root["flow"]["edges"] = [
             edge for edge in root["flow"]["edges"] if edge["source"] != handoff["id"]
         ]
-        second_version = await train(root_id, root, 3)
+        building = await prepare_training(root_id, root, 3)
+        training_started, continue_training = asyncio.Event(), asyncio.Event()
+        run_child = training_worker.run_child
+
+        async def signal_training(request, settings, progress):
+            async def track(stage):
+                await progress(stage)
+                if stage == "intent_training":
+                    training_started.set()
+                    await continue_training.wait()
+
+            return await run_child(request, settings, track)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(training_worker, "run_child", signal_training)
+            async with asyncio.TaskGroup() as tasks:
+                task = tasks.create_task(build(building))
+                try:
+                    await asyncio.wait_for(training_started.wait(), timeout=15)
+                    during_training = (await owner.get(f"{root_url}/versions/{building.id}")).json()
+                    assert during_training["job_status"] == "running"
+                    public_started = await start_public("first-public")
+                    assert public_started.status_code == 201, public_started.text
+                    original = public_started.json()
+                    assert original["release_id"] == release_a["id"]
+                    assert [message["text"] for message in original["messages"]] == [
+                        "Где заказ 321?"
+                    ]
+                    assert "trace" not in original and "revision" not in original
+                finally:
+                    continue_training.set()
+        second_version = task.result()
         assert (await start(second_version))["status"] == "completed"
         etag = (await owner.get(root_url)).headers["etag"]
         second = await owner.post(

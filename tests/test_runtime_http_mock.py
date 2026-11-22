@@ -4,29 +4,37 @@ from uuid import UUID, uuid4
 from dialogentis.http_action import MockIntegration
 from dialogentis.runtime.core import Prediction, RuntimeEngine
 from tests.test_http_action_config import configuration
+from tests.test_runtime_core import edge, node
 
 
 def test_mock_action_maps_only_allowed_fields_and_branches_without_leaking_values():
     config, action = configuration()
-    config["slots"][0]["default"] = "private-order"
+    config["slots"][0]["sensitive"] = True
     config["slots"][1]["sensitive"] = True
-    start, switch = config["flow"]["nodes"][:2]
-    config["flow"]["edges"][0]["target"] = action["id"]
-    reply = {
-        "id": str(uuid4()),
-        "type": "say",
-        "position": {"x": 0, "y": 0},
-        "config": {"text": "Статус: {{status}}"},
-    }
-    config["flow"]["nodes"].append(reply)
+    _, switch, _, end = config["flow"]["nodes"][:4]
+    ask = node(
+        "ask_slot",
+        slot_id=config["slots"][0]["id"],
+        prompt="Укажите номер заказа",
+        checks=[{"kind": "pattern", "pattern": "[0-9]{5}"}],
+    )
+    retry = node("say", text="Нужны пять цифр")
+    reply = node("say", text="Статус: {{status}}")
+    config["flow"]["edges"][0]["target"] = ask["id"]
+    config["flow"]["nodes"] += [ask, retry, reply]
     next(
         e
         for e in config["flow"]["edges"]
         if e["source"] == action["id"] and e["source_handle"] == "success"
     )["target"] = reply["id"]
-    config["flow"]["edges"].append(
-        {"id": str(uuid4()), "source": reply["id"], "target": switch["id"], "source_handle": "next"}
-    )
+    config["flow"]["edges"] += [
+        edge(ask, action, "success"),
+        edge(ask, retry, "invalid"),
+        edge(ask, end, "exhausted"),
+        edge(retry, ask),
+        edge(reply, switch),
+    ]
+    action["config"]["mock_response"]["internal"] = "private-response"
     integration = MockIntegration(
         id=UUID(action["config"]["integration_id"]),
         enabled=True,
@@ -37,14 +45,20 @@ def test_mock_action_maps_only_allowed_fields_and_branches_without_leaking_value
     version = uuid4()
 
     def run(allowed):
-        return RuntimeEngine(
+        engine = RuntimeEngine(
             version, config, lambda _: Prediction(version, None), mock_integrations=allowed
-        ).start()
+        )
+        opened = engine.start()
+        assert opened.messages == ("Укажите номер заказа",)
+        invalid = engine.send(opened.state, "01")
+        assert invalid.messages == ("Нужны пять цифр", "Укажите номер заказа")
+        assert not any(event.node_type == "http_action" for event in invalid.trace)
+        return engine.send(invalid.state, "12345")
 
     result = run([integration])
     assert result.messages == ("Статус: готов",) and result.state.status == "waiting_input"
-    assert "private-order" not in repr(result.trace) and "готов" not in repr(result.trace)
-    assert dict(result.state.slot_values)["status"] == "готов"
+    assert "12345" not in repr(result.trace) and "готов" not in repr(result.trace)
+    assert dict(result.state.slot_values) == {"order": "12345", "status": "готов"}
     rejected = run([integration.model_copy(update={"response_fields": []})])
     assert any(event.output == "invalid_response" for event in rejected.trace)
     assert "status" not in dict(rejected.state.slot_values)
