@@ -97,3 +97,40 @@ async def test_demo_agent_imports_trains_and_answers(app, name):
         )
         assert response.status_code == 200, response.text
         assert response.json()["messages"] == [ANSWERS[intent["code"]]]
+
+        edited = draft.json()["config"]
+        message = next(node for node in edited["flow"]["nodes"] if node["type"] == "say")
+        original = message["config"]["text"]
+        message["config"]["text"] = "Ответ более свежего черновика"
+        saved = await owner.put(
+            f"{agent}/draft",
+            headers={
+                "X-Edit-Lease": lease["lease_token"],
+                "X-Edit-Fence": str(lease["fencing_counter"]),
+                "If-Match": draft.headers["etag"],
+            },
+            json={"schema_version": 1, "config": edited},
+        )
+        assert saved.status_code == 200, saved.text
+        body = {"format": "json", "source": "version", "version_id": str(version_id)}
+        unrelated = await owner.post(
+            f"{organization}/agents", json={"slug": "unrelated", "name": "Другой агент"}
+        )
+        assert unrelated.status_code == 201
+        assert (
+            await owner.post(f"{organization}/agents/{unrelated.json()['id']}/exports", json=body)
+        ).status_code == 404
+        assert (
+            await owner.post(f"{agent}/exports", json={**body, "source": "draft"})
+        ).status_code == 422
+        export = await owner.post(f"{agent}/exports", json=body)
+        assert export.status_code == 202, export.text
+        assert export.json()["revision"] == draft.json()["revision"]
+        export_id = UUID(export.json()["export_id"])
+        await mark_published(app, org_id)
+        await process_job(factory, export_id, org_id)
+        downloaded = await owner.get(f"{organization}/exports/{export_id}/download")
+        assert downloaded.status_code == 200
+        flow = downloaded.json()["config"]["flow"]
+        exported = next(node for node in flow["nodes"] if node["id"] == message["id"])
+        assert exported["config"]["text"] == original

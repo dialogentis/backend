@@ -76,9 +76,22 @@ async def create_export(
     org_id: UUID, agent_id: UUID, body: ExportInput, user: VerifiedUser, db: Database
 ):
     await organization_context(db, user, org_id, "manage_agents", lock=True)
-    if body.source != "draft" or body.version_id is not None:
-        raise HTTPException(422, "Экспорт версий пока недоступен")
-    _, draft = await agent_and_draft(db, org_id, agent_id)
+    if (body.source == "version") != (body.version_id is not None):
+        raise HTTPException(422, "Укажите идентификатор только при экспорте версии")
+    if body.version_id is None:
+        _, draft = await agent_and_draft(db, org_id, agent_id)
+        revision, snapshot = draft.revision, draft.configuration
+    else:
+        version = await db.scalar(
+            select(AgentVersion).where(
+                AgentVersion.id == body.version_id,
+                AgentVersion.organization_id == org_id,
+                AgentVersion.agent_id == agent_id,
+            )
+        )
+        if version is None:
+            raise HTTPException(404, "Версия не найдена")
+        revision, snapshot = version.source_revision, version.snapshot["config"]
     now = await db.scalar(select(func.clock_timestamp()))
     assert now is not None
     job = enqueue(db, org_id, "dataset.export")
@@ -90,14 +103,14 @@ async def create_export(
             agent_id=agent_id,
             requested_by=user.id,
             format=body.format,
-            revision=draft.revision,
-            snapshot=draft.configuration,
+            revision=revision,
+            snapshot=snapshot,
             snapshot_expires_at=now + timedelta(hours=24),
         )
     )
     audit(db, org_id, user, "agent.export_requested", job.id)
     await db.flush()
-    return ExportCreated(job_id=job.id, export_id=job.id, revision=draft.revision)
+    return ExportCreated(job_id=job.id, export_id=job.id, revision=revision)
 
 
 async def export_and_job(db: Database, org_id: UUID, job_id: UUID, *, lock: bool = False):
