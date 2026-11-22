@@ -1,0 +1,103 @@
+{
+  "platform": "linux aarch64 10 vCPU 8321515520 bytes RAM",
+  "docker_engine": "29.6.1",
+  "docker_compose": "5.3.0",
+  "backend_revision": "f2514629bc3a70fa6daaf20ace9c01b8f57543d5",
+  "frontend_revision": "7bd75e22dff2c41973e5a583b2286613b1bbdb52",
+  "smoke": false,
+  "models": 100,
+  "organizations": 10,
+  "cold_model_start": {
+    "succeeded": 90,
+    "errors": {},
+    "p50_ms": 56.7,
+    "p95_ms": 81.8,
+    "p99_ms": 1498.4
+  },
+  "baseline": {
+    "runtime": {
+      "succeeded": 8820,
+      "errors": {
+        "http_409": 180
+      },
+      "p50_ms": 65.5,
+      "p95_ms": 101.1,
+      "p99_ms": 208.1
+    },
+    "cabinet_gets": {
+      "succeeded": 900,
+      "errors": {},
+      "p50_ms": 30.7,
+      "p95_ms": 42.0,
+      "p99_ms": 271.1
+    },
+    "warmup": {
+      "succeeded": 1103,
+      "errors": {
+        "dialog_busy": 77,
+        "http_409": 18,
+        "http_503": 2
+      },
+      "p50_ms": 78.0,
+      "p95_ms": 11758.5,
+      "p99_ms": 17157.6
+    },
+    "measurement_started_at": "2026-11-22T16:26:12.546436+00:00",
+    "warmup_seconds": 120,
+    "measurement_seconds": 900,
+    "messages_per_second": 10,
+    "active_dialogs": 100,
+    "observed_training_jobs_during_measurement": 0,
+    "observed_running_seconds_lower_bound": 0,
+    "dialog_close_errors": {}
+  },
+  "with_training": {
+    "runtime": {
+      "succeeded": 9000,
+      "errors": {},
+      "p50_ms": 67.0,
+      "p95_ms": 125.8,
+      "p99_ms": 309.1
+    },
+    "cabinet_gets": {
+      "succeeded": 900,
+      "errors": {},
+      "p50_ms": 23.5,
+      "p95_ms": 54.6,
+      "p99_ms": 274.6
+    },
+    "warmup": {
+      "succeeded": 1200,
+      "errors": {},
+      "p50_ms": 69.7,
+      "p95_ms": 137.0,
+      "p99_ms": 307.5
+    },
+    "measurement_started_at": "2026-11-22T16:43:22.612292+00:00",
+    "warmup_seconds": 120,
+    "measurement_seconds": 900,
+    "messages_per_second": 10,
+    "active_dialogs": 100,
+    "observed_training_jobs_during_measurement": 381,
+    "observed_running_seconds_lower_bound": 482.0,
+    "dialog_close_errors": {}
+  },
+  "draft_saves": {
+    "1_mib": {
+      "request_bytes": 1048545,
+      "succeeded": 20,
+      "errors": {},
+      "p50_ms": 82.5,
+      "p95_ms": 93.6,
+      "p99_ms": 95.4
+    },
+    "10_mib": {
+      "request_bytes": 10485729,
+      "succeeded": 20,
+      "errors": {},
+      "p50_ms": 785.4,
+      "p95_ms": 899.4,
+      "p99_ms": 966.6
+    }
+  }
+}
