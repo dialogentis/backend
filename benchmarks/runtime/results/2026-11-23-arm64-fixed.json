@@ -1,0 +1,247 @@
+{
+  "platform": "linux aarch64 10 vCPU 8321515520 bytes RAM",
+  "docker_engine": "29.6.1",
+  "docker_compose": "5.3.0",
+  "backend_revision": "70fd186ba91e38ce9f9a4031d1b00ec402d103b4",
+  "frontend_revision": "9c52b60830cfd73020340233e7a7118d046be759",
+  "smoke": false,
+  "models": 100,
+  "organizations": 10,
+  "cold_model_start": {
+    "succeeded": 90,
+    "errors": {},
+    "p50_ms": 28.2,
+    "p95_ms": 32.5,
+    "p99_ms": 800.6
+  },
+  "baseline": {
+    "runtime": {
+      "succeeded": 9000,
+      "errors": {},
+      "p50_ms": 42.8,
+      "p95_ms": 49.5,
+      "p99_ms": 75.5
+    },
+    "cabinet_gets": {
+      "succeeded": 900,
+      "errors": {},
+      "p50_ms": 18.9,
+      "p95_ms": 29.3,
+      "p99_ms": 34.9
+    },
+    "warmup": {
+      "succeeded": 1200,
+      "errors": {},
+      "p50_ms": 43.3,
+      "p95_ms": 49.7,
+      "p99_ms": 76.3
+    },
+    "measurement_started_at": "2026-11-23T17:34:25.631515+00:00",
+    "warmup_seconds": 120,
+    "measurement_seconds": 900,
+    "messages_per_second": 10,
+    "active_dialogs": 100,
+    "observed_training_jobs_during_measurement": 0,
+    "observed_running_seconds_lower_bound": 0,
+    "dialog_close_errors": {}
+  },
+  "with_training": {
+    "runtime": {
+      "succeeded": 9000,
+      "errors": {},
+      "p50_ms": 41.5,
+      "p95_ms": 55.4,
+      "p99_ms": 87.8
+    },
+    "cabinet_gets": {
+      "succeeded": 900,
+      "errors": {},
+      "p50_ms": 18.8,
+      "p95_ms": 27.9,
+      "p99_ms": 125.9
+    },
+    "warmup": {
+      "succeeded": 1200,
+      "errors": {},
+      "p50_ms": 41.2,
+      "p95_ms": 50.5,
+      "p99_ms": 87.8
+    },
+    "measurement_started_at": "2026-11-23T17:51:30.221251+00:00",
+    "warmup_seconds": 120,
+    "measurement_seconds": 900,
+    "messages_per_second": 10,
+    "active_dialogs": 100,
+    "observed_training_jobs_during_measurement": 491,
+    "observed_running_seconds_lower_bound": 313.7,
+    "dialog_close_errors": {}
+  },
+  "draft_saves": {
+    "1_mib": {
+      "request_bytes": 1048545,
+      "succeeded": 20,
+      "errors": {},
+      "p50_ms": 92.6,
+      "p95_ms": 123.2,
+      "p99_ms": 128.6
+    },
+    "10_mib": {
+      "request_bytes": 10485729,
+      "succeeded": 20,
+      "errors": {},
+      "p50_ms": 816.6,
+      "p95_ms": 1085.1,
+      "p99_ms": 1319.0
+    }
+  },
+  "resources": {
+    "baseline": {
+      "api": {
+        "samples": 128,
+        "cpu_mean_percent_of_vcpu": 28.73,
+        "cpu_peak_percent_of_vcpu": 46.55,
+        "ram_peak_mib": 1041.41
+      },
+      "dispatcher": {
+        "samples": 128,
+        "cpu_mean_percent_of_vcpu": 0.13,
+        "cpu_peak_percent_of_vcpu": 0.44,
+        "ram_peak_mib": 184.4
+      },
+      "frontend": {
+        "samples": 128,
+        "cpu_mean_percent_of_vcpu": 0.36,
+        "cpu_peak_percent_of_vcpu": 0.7,
+        "ram_peak_mib": 16.59
+      },
+      "mailer": {
+        "samples": 128,
+        "cpu_mean_percent_of_vcpu": 0.25,
+        "cpu_peak_percent_of_vcpu": 0.76,
+        "ram_peak_mib": 95.34
+      },
+      "mailpit": {
+        "samples": 128,
+        "cpu_mean_percent_of_vcpu": 0.07,
+        "cpu_peak_percent_of_vcpu": 1.23,
+        "ram_peak_mib": 15.95
+      },
+      "maintenance-worker": {
+        "samples": 128,
+        "cpu_mean_percent_of_vcpu": 0.23,
+        "cpu_peak_percent_of_vcpu": 11.65,
+        "ram_peak_mib": 215.8
+      },
+      "postgres": {
+        "samples": 128,
+        "cpu_mean_percent_of_vcpu": 15.49,
+        "cpu_peak_percent_of_vcpu": 24.14,
+        "ram_peak_mib": 112.1
+      },
+      "rabbitmq": {
+        "samples": 128,
+        "cpu_mean_percent_of_vcpu": 7.98,
+        "cpu_peak_percent_of_vcpu": 39.18,
+        "ram_peak_mib": 203.6
+      },
+      "runtime-watchdog": {
+        "samples": 128,
+        "cpu_mean_percent_of_vcpu": 0.19,
+        "cpu_peak_percent_of_vcpu": 2.05,
+        "ram_peak_mib": 90.24
+      },
+      "scheduler": {
+        "samples": 128,
+        "cpu_mean_percent_of_vcpu": 0.03,
+        "cpu_peak_percent_of_vcpu": 0.41,
+        "ram_peak_mib": 110.4
+      },
+      "training-worker": {
+        "samples": 128,
+        "cpu_mean_percent_of_vcpu": 0.02,
+        "cpu_peak_percent_of_vcpu": 0.25,
+        "ram_peak_mib": 295.3
+      },
+      "worker": {
+        "samples": 128,
+        "cpu_mean_percent_of_vcpu": 0.03,
+        "cpu_peak_percent_of_vcpu": 1.01,
+        "ram_peak_mib": 185.8
+      }
+    },
+    "with_training": {
+      "api": {
+        "samples": 129,
+        "cpu_mean_percent_of_vcpu": 31.83,
+        "cpu_peak_percent_of_vcpu": 52.4,
+        "ram_peak_mib": 1052.67
+      },
+      "dispatcher": {
+        "samples": 129,
+        "cpu_mean_percent_of_vcpu": 0.21,
+        "cpu_peak_percent_of_vcpu": 1.02,
+        "ram_peak_mib": 184.2
+      },
+      "frontend": {
+        "samples": 129,
+        "cpu_mean_percent_of_vcpu": 0.55,
+        "cpu_peak_percent_of_vcpu": 1.13,
+        "ram_peak_mib": 16.64
+      },
+      "mailer": {
+        "samples": 129,
+        "cpu_mean_percent_of_vcpu": 0.26,
+        "cpu_peak_percent_of_vcpu": 0.92,
+        "ram_peak_mib": 95.34
+      },
+      "mailpit": {
+        "samples": 129,
+        "cpu_mean_percent_of_vcpu": 0.06,
+        "cpu_peak_percent_of_vcpu": 1.84,
+        "ram_peak_mib": 15.91
+      },
+      "maintenance-worker": {
+        "samples": 129,
+        "cpu_mean_percent_of_vcpu": 0.38,
+        "cpu_peak_percent_of_vcpu": 16.05,
+        "ram_peak_mib": 219.0
+      },
+      "postgres": {
+        "samples": 129,
+        "cpu_mean_percent_of_vcpu": 17.67,
+        "cpu_peak_percent_of_vcpu": 32.77,
+        "ram_peak_mib": 188.9
+      },
+      "rabbitmq": {
+        "samples": 129,
+        "cpu_mean_percent_of_vcpu": 5.93,
+        "cpu_peak_percent_of_vcpu": 41.76,
+        "ram_peak_mib": 177.5
+      },
+      "runtime-watchdog": {
+        "samples": 129,
+        "cpu_mean_percent_of_vcpu": 0.21,
+        "cpu_peak_percent_of_vcpu": 1.9,
+        "ram_peak_mib": 90.24
+      },
+      "scheduler": {
+        "samples": 129,
+        "cpu_mean_percent_of_vcpu": 0.05,
+        "cpu_peak_percent_of_vcpu": 1.56,
+        "ram_peak_mib": 110.4
+      },
+      "training-worker": {
+        "samples": 129,
+        "cpu_mean_percent_of_vcpu": 51.57,
+        "cpu_peak_percent_of_vcpu": 94.28,
+        "ram_peak_mib": 463.9
+      },
+      "worker": {
+        "samples": 129,
+        "cpu_mean_percent_of_vcpu": 0.03,
+        "cpu_peak_percent_of_vcpu": 0.96,
+        "ram_peak_mib": 185.8
+      }
+    }
+  }
+}
