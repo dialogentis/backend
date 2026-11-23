@@ -9459,7 +9459,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/MessageView"
+                  "$ref": "#/components/schemas/WidgetSession"
                 }
               }
             }

@@ -362,7 +362,7 @@ UUID используется для внешних идентификаторо
 
 - `POST /runtime/agents/{agent_id}/conversations` с API key → 201 `{conversation_id,conversation_token,release_id,expires_at,messages}`. Agent должен совпасть с ограничением ключа.
 - `POST /runtime/conversations/{conversation_id}/messages` с API key, X-Conversation-Token и Idempotency-Key; тело `{client_message_id,text}` → 200 runtime result. `POST .../close` → 204. `GET .../receipt/{client_message_id}` → технический статус без внутренней трассировки.
-- `POST /widget/channels/{channel_id}/sessions` с проверенным браузерным bootstrap → 201 token и conversation_id. `POST /widget/conversations/{id}/messages` принимает только widget bearer и Idempotency-Key; модель ответа совпадает с runtime. Widget token не подходит к management API или другим conversation_id.
+- `POST /widget/channels/{channel_id}/sessions` с проверенным браузерным bootstrap → 201 token и conversation_id. `POST /widget/conversations/{id}/messages` принимает только widget bearer и Idempotency-Key; ответ расширяет результат runtime обновлённым `session_token`. Widget token не подходит к management API или другим conversation_id.
 
 Пример успешного результата публичного сообщения:
 

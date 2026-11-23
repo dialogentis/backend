@@ -22,6 +22,7 @@ from dialogentis.jobs.lifecycle import (
     complete,
     fail,
     heartbeat,
+    recover_dead_letter,
     recover_tenant,
 )
 from dialogentis.jobs.models import Job, OutboxEvent
@@ -197,7 +198,22 @@ async def test_recovery_fences_worker_and_does_not_retry_training(factory):
         assert other_job is not None and other_job.status == "running"
 
 
-async def test_lost_delivery_is_requeued_only_a_bounded_number_of_times(factory):
+async def test_queue_age_never_fails_a_delivered_job(factory):
+    factory, tenants = factory
+    org_id = uuid4()
+    tenants.append(org_id)
+    async with unit_of_work(factory, organization_id=org_id) as db:
+        job = enqueue(db, org_id, "agent.training")
+        job.delivery_recoveries = MAX_DELIVERY_RECOVERIES
+        job_id = job.id
+        event = await db.scalar(select(OutboxEvent).where(OutboxEvent.job_id == job_id))
+        assert event is not None
+        event.published_at = datetime.now(UTC) - timedelta(hours=1)
+    assert await recover_tenant(factory, org_id, frozenset()) == 0
+    assert await claim(factory, job_id, org_id, frozenset({"agent.training"}), "training")
+
+
+async def test_rejected_deliveries_are_requeued_once_per_event_and_bounded(factory):
     factory, tenants = factory
     org_id = uuid4()
     tenants.append(org_id)
@@ -205,15 +221,15 @@ async def test_lost_delivery_is_requeued_only_a_bounded_number_of_times(factory)
         job_id = enqueue(db, org_id, "test").id
     for number in range(MAX_DELIVERY_RECOVERIES + 1):
         async with unit_of_work(factory, organization_id=org_id) as db:
-            job = await db.get(Job, job_id)
-            assert job is not None
-            job.next_retry_at = datetime.now(UTC) - timedelta(seconds=1)
-            events = (
-                await db.scalars(select(OutboxEvent).where(OutboxEvent.job_id == job_id))
-            ).all()
-            for event in events:
-                event.published_at = datetime.now(UTC) - timedelta(minutes=6)
-        assert await recover_tenant(factory, org_id, frozenset({"test"})) == 1
+            event_id = await db.scalar(
+                select(OutboxEvent.id)
+                .where(OutboxEvent.job_id == job_id)
+                .order_by(OutboxEvent.available_at.desc(), OutboxEvent.id.desc())
+                .limit(1)
+            )
+            assert event_id is not None
+        assert await recover_dead_letter(factory, org_id, job_id, event_id, "normal")
+        assert not await recover_dead_letter(factory, org_id, job_id, event_id, "normal")
         async with unit_of_work(factory, organization_id=org_id) as db:
             job = await db.get(Job, job_id)
             assert job is not None
@@ -221,7 +237,42 @@ async def test_lost_delivery_is_requeued_only_a_bounded_number_of_times(factory)
                 assert job.status == "queued" and job.delivery_recoveries == number + 1
             else:
                 assert job.status == "failed" and job.error_code == "delivery_lost"
-        assert await recover_tenant(factory, org_id, frozenset({"test"})) == 0
+
+
+async def test_broker_rejection_recovers_the_linked_outbox_event(factory):
+    from dialogentis.jobs.dead_letters import recover_dead_letters
+    from dialogentis.jobs.tasks import broker, run_job
+
+    factory, tenants = factory
+    org_id = uuid4()
+    tenants.append(org_id)
+    async with unit_of_work(factory, organization_id=org_id) as db:
+        job_id = enqueue(db, org_id, "test").id
+        event = await db.scalar(select(OutboxEvent).where(OutboxEvent.job_id == job_id))
+        assert event is not None
+        event_id = event.id
+        event.published_at = datetime.now(UTC)
+
+    await broker.startup()
+    try:
+        assert broker.write_channel is not None
+        ready = await broker.write_channel.get_queue("dialogentis.jobs", ensure=True)
+        await run_job.kicker().with_task_id(str(event_id)).kiq(job_id, org_id)
+        delivery = await ready.get(timeout=5)
+        assert delivery is not None
+        await delivery.reject(requeue=False)
+        for _ in range(20):
+            await recover_dead_letters(factory, broker)
+            async with unit_of_work(factory, organization_id=org_id) as db:
+                job = await db.get(Job, job_id)
+                if job and job.delivery_recoveries == 1:
+                    assert job.next_retry_at is not None and job.status == "queued"
+                    break
+            await asyncio.sleep(0.1)
+        else:
+            pytest.fail("RabbitMQ rejection did not schedule a new outbox event")
+    finally:
+        await broker.shutdown()
 
 
 async def test_periodic_reconciliation_is_deduplicated_and_recovers_overdue_work(factory):

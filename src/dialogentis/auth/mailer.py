@@ -6,11 +6,13 @@ from datetime import UTC, datetime, timedelta
 from email.message import EmailMessage
 
 from cryptography.fernet import Fernet, InvalidToken
-from sqlalchemy import delete, select
+from sqlalchemy import and_, delete, or_, select, update
 
 from dialogentis.auth.models import AuthToken, EmailOutbox, RateEvent, Session
 from dialogentis.config import Settings, get_settings
 from dialogentis.db import session_factory, unit_of_work
+
+MAX_DELIVERY_ATTEMPTS = 5
 
 
 def send_email(config: Settings, payload: dict) -> None:
@@ -46,7 +48,7 @@ async def dispatch_once(config: Settings, factory) -> int:
                 .where(
                     EmailOutbox.sent_at.is_(None),
                     EmailOutbox.available_at <= now,
-                    EmailOutbox.attempts < 5,
+                    EmailOutbox.attempts < MAX_DELIVERY_ATTEMPTS,
                 )
                 .order_by(EmailOutbox.available_at)
                 .limit(10)
@@ -63,14 +65,33 @@ async def dispatch_once(config: Settings, factory) -> int:
                 )
                 await asyncio.to_thread(send_email, config, payload)
             except smtplib.SMTPException, OSError, InvalidToken, ValueError:
-                row.available_at = now + timedelta(seconds=60 * 2**row.attempts)
+                if row.attempts == MAX_DELIVERY_ATTEMPTS:
+                    row.available_at, row.encrypted_payload = now, ""
+                else:
+                    row.available_at = now + timedelta(seconds=60 * 2**row.attempts)
             else:
                 row.sent_at, row.encrypted_payload = now, ""
                 sent += 1
-        await db.execute(delete(RateEvent).where(RateEvent.created_at < now - timedelta(days=1)))
+        cutoff = now - timedelta(days=1)
+        await db.execute(delete(RateEvent).where(RateEvent.created_at < cutoff))
         await db.execute(delete(AuthToken).where(AuthToken.expires_at < now))
         await db.execute(delete(Session).where(Session.expires_at < now))
-        await db.execute(delete(EmailOutbox).where(EmailOutbox.sent_at < now - timedelta(days=1)))
+        failed_mail = and_(
+            EmailOutbox.sent_at.is_(None), EmailOutbox.attempts >= MAX_DELIVERY_ATTEMPTS
+        )
+        await db.execute(
+            delete(EmailOutbox).where(
+                or_(
+                    EmailOutbox.sent_at < cutoff,
+                    and_(failed_mail, EmailOutbox.available_at < cutoff),
+                )
+            )
+        )
+        await db.execute(
+            update(EmailOutbox)
+            .where(failed_mail, EmailOutbox.encrypted_payload != "")
+            .values(encrypted_payload="")
+        )
     return sent
 
 

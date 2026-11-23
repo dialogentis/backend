@@ -18,6 +18,7 @@ from dialogentis.datasets.export_worker import scrub_exports
 from dialogentis.datasets.import_worker import scrub_imports
 from dialogentis.db import session_factory, unit_of_work
 from dialogentis.jobs.broker import create_broker
+from dialogentis.jobs.dead_letters import recover_dead_letters
 from dialogentis.jobs.dispatcher import dispatcher_factory
 from dialogentis.jobs.lifecycle import recover_tenant
 from dialogentis.jobs.models import MaintenanceRun, OutboxEvent
@@ -144,6 +145,7 @@ async def reconcile(context: Context = TaskiqDepends()) -> None:
 
         retryable = frozenset(kind for kind, handler in HANDLERS.items() if handler.retryable)
         await reconcile_once(factory, dispatch_factory, window, retryable)
+        await recover_dead_letters(factory, broker)
         await context.ack()
     except Exception:
         if broker.read_channel is not None:

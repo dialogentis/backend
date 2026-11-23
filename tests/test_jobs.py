@@ -118,9 +118,9 @@ async def test_dispatcher_is_restricted_and_recovers_after_publish_failure(tmp_p
 
         uncertain = []
 
-        async def fail_publish(job_id, org_id, queue):
+        async def fail_publish(job_id, org_id, queue, event_id):
             assert queue == "normal"
-            uncertain.append((job_id, org_id))
+            uncertain.append((job_id, org_id, event_id))
             raise ConnectionError("publication confirmation lost")
 
         with pytest.raises(ConnectionError):
@@ -151,9 +151,9 @@ async def test_dispatcher_is_restricted_and_recovers_after_publish_failure(tmp_p
                 await broker.startup()
                 assert broker.write_channel is not None and broker.write_channel.publisher_confirms
 
-                async def publish(job_id, org_id, queue):
+                async def publish(job_id, org_id, queue, event_id):
                     assert queue == "normal"
-                    assert (job_id, org_id) == uncertain[0]
+                    assert (job_id, org_id, event_id) == uncertain[0]
                     await job_probe.kiq(job_id, org_id)
 
                 assert await dispatch_once(dispatch_factory, publish) == 1

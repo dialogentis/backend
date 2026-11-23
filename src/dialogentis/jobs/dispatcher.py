@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from dialogentis.jobs.models import OutboxEvent
 from dialogentis.telemetry import log_event
 
-Publisher = Callable[[UUID, UUID, str], Awaitable[None]]
+Publisher = Callable[[UUID, UUID, str, UUID], Awaitable[None]]
 
 
 def dispatcher_factory(password_file: Path) -> async_sessionmaker[AsyncSession]:
@@ -43,7 +43,7 @@ async def dispatch_once(factory: async_sessionmaker[AsyncSession], publish: Publ
         ).all()
         for event in events:
             started = monotonic()
-            await publish(event.job_id, event.organization_id, event.queue)
+            await publish(event.job_id, event.organization_id, event.queue, event.id)
             event.published_at = datetime.now(UTC)
             log_event("dispatcher", "job_published", started=started, job_id=event.job_id)
         return len(events)
@@ -66,11 +66,15 @@ async def main() -> None:
         ):
             raise RuntimeError("RabbitMQ publisher confirms are required")
 
-        async def publish(job_id: UUID, organization_id: UUID, queue: str) -> None:
+        async def publish(job_id: UUID, organization_id: UUID, queue: str, event_id: UUID) -> None:
             if queue == "normal":
-                await run_job.kiq(job_id, organization_id)
+                await run_job.kicker().with_task_id(str(event_id)).kiq(job_id, organization_id)
             elif queue == "training":
-                await run_training_job.kiq(job_id, organization_id)
+                await (
+                    run_training_job.kicker()
+                    .with_task_id(str(event_id))
+                    .kiq(job_id, organization_id)
+                )
             else:
                 raise ValueError("Unknown job queue")
 

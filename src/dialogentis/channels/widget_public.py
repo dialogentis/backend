@@ -138,14 +138,14 @@ async def start_session(
     )
 
 
-@router.post("/conversations/{conversation_id}/messages", response_model=MessageView)
+@router.post("/conversations/{conversation_id}/messages", response_model=WidgetSession)
 async def send_widget_message(
     conversation_id: UUID,
     body: RuntimeMessageInput,
     request: Request,
     credential: Bearer,
     key: IdempotencyKey,
-) -> MessageView:
+) -> WidgetSession:
     require_frame_origin(request)
     if credential is None:
         raise unavailable(401)
@@ -163,4 +163,7 @@ async def send_widget_message(
         )
     except ArtifactUnavailable, ExecutionError, InvalidVersionFlow:
         raise unavailable(503) from None
-    return view(request, result)
+    return WidgetSession(
+        **view(request, result).model_dump(),
+        session_token=issue_widget_token(request.app.state.settings, claim),
+    )

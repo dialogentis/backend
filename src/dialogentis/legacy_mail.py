@@ -11,7 +11,9 @@ async def has_untagged_invitation_mail(db: AsyncSession, key: str) -> bool:
     rows = (
         await db.scalars(
             select(EmailOutbox.encrypted_payload).where(
-                EmailOutbox.organization_id.is_(None), EmailOutbox.sent_at.is_(None)
+                EmailOutbox.organization_id.is_(None),
+                EmailOutbox.sent_at.is_(None),
+                EmailOutbox.encrypted_payload != "",
             )
         )
     ).all()
