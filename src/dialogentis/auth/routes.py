@@ -2,6 +2,7 @@ import asyncio
 import json
 import secrets
 from datetime import UTC, datetime, timedelta
+from urllib.parse import urlencode
 from uuid import UUID
 
 from cryptography.fernet import Fernet
@@ -40,11 +41,15 @@ class EmailInput(InputModel):
     email: EmailStr
 
 
+class RegistrationInput(EmailInput):
+    invitation_token: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_-]{43}$")
+
+
 class TokenInput(InputModel):
     token: str = Field(min_length=20, max_length=512)
 
 
-class ResetInput(TokenInput):
+class PasswordSetupInput(TokenInput):
     password: str = Field(min_length=12, max_length=128)
 
 
@@ -72,7 +77,9 @@ def user_json(user: User) -> dict:
     return {"id": str(user.id), "email": user.email, "email_verified": user.email_verified}
 
 
-async def enqueue_token(db: Database, request: Request, user: User, purpose: str) -> None:
+async def enqueue_token(
+    db: Database, request: Request, user: User, purpose: str, invitation_token: str | None = None
+) -> None:
     key = request.app.state.settings.encryption_key
     if key is None:
         raise HTTPException(503, "Почтовый сервис не настроен")
@@ -90,7 +97,10 @@ async def enqueue_token(db: Database, request: Request, user: User, purpose: str
     )
     path = "reset-password" if purpose == "reset" else "verify-email"
     subject = "Восстановление пароля" if purpose == "reset" else "Подтверждение почты"
-    url = f"{request.app.state.settings.public_base_url}/{path}#token={token}"
+    fragment = {"token": token}
+    if invitation_token is not None:
+        fragment["invite"] = invitation_token
+    url = f"{request.app.state.settings.public_base_url}/{path}#{urlencode(fragment)}"
     payload = json.dumps(
         {
             "to": user.email,
@@ -111,63 +121,60 @@ async def enqueue_token(db: Database, request: Request, user: User, purpose: str
 
 
 async def consume_token(db: Database, raw: str, purpose: str) -> User:
-    token = await db.scalar(
-        select(AuthToken)
-        .where(
-            AuthToken.token_hash == digest(raw),
-            AuthToken.purpose == purpose,
-            AuthToken.consumed_at.is_(None),
-            AuthToken.expires_at > datetime.now(UTC),
-        )
-        .with_for_update()
+    conditions = (
+        AuthToken.token_hash == digest(raw),
+        AuthToken.purpose == purpose,
+        AuthToken.consumed_at.is_(None),
+        AuthToken.expires_at > datetime.now(UTC),
     )
+    owner = select(AuthToken.user_id).where(*conditions).scalar_subquery()
+    # Issuance also locks the user before changing the tokens.
+    user = await db.scalar(select(User).where(User.id == owner).with_for_update())
+    if user is None:
+        raise HTTPException(400, "Ссылка недействительна или срок её действия истёк")
+    token = await db.scalar(select(AuthToken).where(*conditions).with_for_update())
     if token is None:
         raise HTTPException(400, "Ссылка недействительна или срок её действия истёк")
     token.consumed_at = datetime.now(UTC)
-    user = await db.scalar(select(User).where(User.id == token.user_id).with_for_update())
-    if user is None:
-        raise HTTPException(400, "Ссылка недействительна")
     return user
 
 
 @router.post("/register", status_code=202, dependencies=[Depends(require_origin)])
-async def register(body: Credentials, request: Request, db: Database):
+async def register(body: RegistrationInput, request: Request, db: Database):
     email = str(body.email).casefold()
     await rate_limit(db, request, "verification", email, 3, 60)
     await rate_limit(
         db, request, "register-ip", request.client.host if request.client else "unknown", 20, 60
     )
-    encoded = await asyncio.to_thread(hasher.hash, body.password)
-    result = await db.scalar(
+    await db.execute(
         insert(User)
-        .values(email=email, password_hash=encoded, email_verified=False)
+        .values(email=email, password_hash=dummy_hash, email_verified=False)
         .on_conflict_do_nothing()
-        .returning(User.id)
     )
-    user = (
-        await db.get(User, result)
-        if result
-        else await db.scalar(select(User).where(User.email == email))
-    )
+    user = await db.scalar(select(User).where(User.email == email).with_for_update())
     if user is not None and not user.email_verified:
-        await enqueue_token(db, request, user, "verify")
+        await enqueue_token(db, request, user, "verify", body.invitation_token)
     return NEUTRAL
 
 
 @router.post("/resend-verification", status_code=202, dependencies=[Depends(require_origin)])
-async def resend(body: EmailInput, request: Request, db: Database):
+async def resend(body: RegistrationInput, request: Request, db: Database):
     email = str(body.email).casefold()
     await rate_limit(db, request, "verification", email, 3, 60)
-    user = await db.scalar(select(User).where(User.email == email))
+    user = await db.scalar(select(User).where(User.email == email).with_for_update())
     if user is not None and not user.email_verified:
-        await enqueue_token(db, request, user, "verify")
+        await enqueue_token(db, request, user, "verify", body.invitation_token)
     return NEUTRAL
 
 
 @router.post("/verify-email", status_code=204, dependencies=[Depends(require_origin)])
-async def verify(body: TokenInput, db: Database):
+async def verify(body: PasswordSetupInput, db: Database):
     user = await consume_token(db, body.token, "verify")
+    if user.email_verified:
+        raise HTTPException(400, "Ссылка недействительна")
+    user.password_hash = await asyncio.to_thread(hasher.hash, body.password)
     user.email_verified = True
+    await db.execute(delete(Session).where(Session.user_id == user.id))
 
 
 @router.post("/login", response_model=LoginResult)
@@ -178,8 +185,11 @@ async def login(body: Credentials, request: Request, db: Database, response: Res
     ip_key = await rate_limit(db, request, "login-ip", ip, 20, 15, record=False)
     pair_key = await rate_limit(db, request, "login-pair", f"{ip}:{email}", 5, 15, record=False)
     user = await db.scalar(select(User).where(User.email == email).with_for_update())
-    valid = await check_password(user.password_hash if user else dummy_hash, body.password)
-    if user is None or not valid:
+    verified = user is not None and user.email_verified
+    valid = await check_password(
+        user.password_hash if verified and user else dummy_hash, body.password
+    )
+    if user is None or not verified or not valid:
         db.add_all([RateEvent(subject_hash=ip_key), RateEvent(subject_hash=pair_key)])
         return error_response(request, 401, "invalid_credentials", "Неверная почта или пароль")
     old = request.cookies.get(COOKIE)
@@ -236,15 +246,19 @@ async def logout_all(request: Request, user: CurrentUser, db: Database, response
 async def forgot(body: EmailInput, request: Request, db: Database):
     email = str(body.email).casefold()
     await rate_limit(db, request, "reset", email, 3, 60)
-    user = await db.scalar(select(User).where(User.email == email))
-    if user is not None:
+    user = await db.scalar(select(User).where(User.email == email).with_for_update())
+    if user is not None and user.email_verified:
         await enqueue_token(db, request, user, "reset")
     return NEUTRAL
 
 
 @router.post("/reset-password", status_code=204, dependencies=[Depends(require_origin)])
-async def reset_password(body: ResetInput, request: Request, db: Database, response: Response):
+async def reset_password(
+    body: PasswordSetupInput, request: Request, db: Database, response: Response
+):
     user = await consume_token(db, body.token, "reset")
+    if not user.email_verified:
+        raise HTTPException(400, "Ссылка недействительна")
     user.password_hash = await asyncio.to_thread(hasher.hash, body.password)
     await db.execute(delete(Session).where(Session.user_id == user.id))
     response.delete_cookie(COOKIE, httponly=True, samesite="lax")

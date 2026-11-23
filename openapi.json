@@ -16,7 +16,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/Credentials"
+                "$ref": "#/components/schemas/RegistrationInput"
               }
             }
           },
@@ -165,7 +165,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/EmailInput"
+                "$ref": "#/components/schemas/RegistrationInput"
               }
             }
           },
@@ -314,7 +314,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/TokenInput"
+                "$ref": "#/components/schemas/PasswordSetupInput"
               }
             }
           },
@@ -1167,7 +1167,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/ResetInput"
+                "$ref": "#/components/schemas/PasswordSetupInput"
               }
             }
           },
@@ -22877,6 +22877,29 @@
         "maxItems": 20,
         "minItems": 1
       },
+      "PasswordSetupInput": {
+        "properties": {
+          "token": {
+            "type": "string",
+            "maxLength": 512,
+            "minLength": 20,
+            "title": "Token"
+          },
+          "password": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 12,
+            "title": "Password"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "token",
+          "password"
+        ],
+        "title": "PasswordSetupInput"
+      },
       "Position": {
         "properties": {
           "x": {
@@ -23036,6 +23059,33 @@
           "sequence"
         ],
         "title": "ReceiptView"
+      },
+      "RegistrationInput": {
+        "properties": {
+          "email": {
+            "type": "string",
+            "format": "email",
+            "title": "Email"
+          },
+          "invitation_token": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_-]{43}$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Invitation Token"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "email"
+        ],
+        "title": "RegistrationInput"
       },
       "ReleaseCheck": {
         "properties": {
@@ -23260,29 +23310,6 @@
           "warnings"
         ],
         "title": "ReportView"
-      },
-      "ResetInput": {
-        "properties": {
-          "token": {
-            "type": "string",
-            "maxLength": 512,
-            "minLength": 20,
-            "title": "Token"
-          },
-          "password": {
-            "type": "string",
-            "maxLength": 128,
-            "minLength": 12,
-            "title": "Password"
-          }
-        },
-        "additionalProperties": false,
-        "type": "object",
-        "required": [
-          "token",
-          "password"
-        ],
-        "title": "ResetInput"
       },
       "RoleInput": {
         "properties": {
@@ -23692,22 +23719,6 @@
           "text"
         ],
         "title": "TextMessage"
-      },
-      "TokenInput": {
-        "properties": {
-          "token": {
-            "type": "string",
-            "maxLength": 512,
-            "minLength": 20,
-            "title": "Token"
-          }
-        },
-        "additionalProperties": false,
-        "type": "object",
-        "required": [
-          "token"
-        ],
-        "title": "TokenInput"
       },
       "TraceTurn": {
         "properties": {

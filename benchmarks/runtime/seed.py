@@ -58,7 +58,7 @@ async def register(client: httpx.AsyncClient, mailbox: httpx.AsyncClient) -> dic
         "email": f"load-{uuid4().hex}@example.com",
         "password": secrets.token_urlsafe(24),
     }
-    check(await client.post("/api/v1/auth/register", json=credentials), 202)
+    check(await client.post("/api/v1/auth/register", json={"email": credentials["email"]}), 202)
     async with asyncio.timeout(25):
         while True:
             for message in check(await mailbox.get("/api/v1/messages"), 200)["messages"]:
@@ -69,7 +69,11 @@ async def register(client: httpx.AsyncClient, mailbox: httpx.AsyncClient) -> dic
                 if matched is None:
                     raise RuntimeError("The verification message has no link")
                 check(
-                    await client.post("/api/v1/auth/verify-email", json={"token": matched[1]}), 204
+                    await client.post(
+                        "/api/v1/auth/verify-email",
+                        json={"token": matched[1], "password": credentials["password"]},
+                    ),
+                    204,
                 )
                 await login(client, credentials)
                 return credentials

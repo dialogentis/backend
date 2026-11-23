@@ -1,6 +1,7 @@
 import asyncio
 import os
 import re
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import httpx
@@ -9,10 +10,11 @@ from sqlalchemy import select
 
 from dialogentis.api import create_app
 from dialogentis.auth.mailer import dispatch_once
-from dialogentis.auth.models import AuthToken
-from dialogentis.auth.security import COOKIE, digest
+from dialogentis.auth.models import AuthToken, Session
+from dialogentis.auth.security import COOKIE, digest, hasher
 from dialogentis.config import Settings
 from dialogentis.db import unit_of_work
+from dialogentis.models import User
 
 pytestmark = [
     pytest.mark.integration,
@@ -58,15 +60,14 @@ async def mail_token(app, email: str, subject: str) -> str:
     raise AssertionError("Email was not delivered to Mailpit")
 
 
-async def account(app, client, *, verify=True):
+async def account(app, client):
     email = f"account-{uuid4()}@example.com"
-    result = await client.post("/api/v1/auth/register", json={"email": email, "password": PASSWORD})
+    result = await client.post("/api/v1/auth/register", json={"email": email})
     assert result.status_code == 202, result.text
-    if verify:
-        token = await mail_token(app, email, "Подтверждение")
-        assert (
-            await client.post("/api/v1/auth/verify-email", json={"token": token})
-        ).status_code == 204
+    token = await mail_token(app, email, "Подтверждение")
+    assert (
+        await client.post("/api/v1/auth/verify-email", json={"token": token, "password": PASSWORD})
+    ).status_code == 204
     response = await client.post("/api/v1/auth/login", json={"email": email, "password": PASSWORD})
     assert response.status_code == 200, response.text
     client.headers["X-CSRF-Token"] = response.json()["csrf_token"]
@@ -75,19 +76,26 @@ async def account(app, client, *, verify=True):
 
 async def test_verification_reset_and_revocation(app):
     async with client_for(app) as client:
-        email, _ = await account(app, client, verify=False)
-        assert not (await client.get("/api/v1/auth/me")).json()["user"]["email_verified"]
-        assert (await client.get("/api/v1/organizations")).status_code == 403
+        email = f"account-{uuid4()}@example.com"
+        credentials = {"email": email, "password": PASSWORD}
+        assert (
+            await client.post("/api/v1/auth/register", json={"email": email})
+        ).status_code == 202
+        assert (await client.post("/api/v1/auth/login", json=credentials)).status_code == 401
+        assert (await client.get("/api/v1/organizations")).status_code == 401
         token = await mail_token(app, email, "Подтверждение")
         async with unit_of_work(app.state.session_factory) as db:
             stored = await db.scalar(select(AuthToken).where(AuthToken.token_hash == digest(token)))
             assert stored is not None and stored.token_hash != token
         assert (
             await client.post("/api/v1/auth/verify-email", json={"token": token})
-        ).status_code == 204
-        assert (
-            await client.post("/api/v1/auth/verify-email", json={"token": token})
-        ).status_code == 400
+        ).status_code == 422
+        setup = {"token": token, "password": PASSWORD}
+        assert (await client.post("/api/v1/auth/verify-email", json=setup)).status_code == 204
+        assert (await client.post("/api/v1/auth/verify-email", json=setup)).status_code == 400
+        login = await client.post("/api/v1/auth/login", json=credentials)
+        assert login.status_code == 200
+        client.headers["X-CSRF-Token"] = login.json()["csrf_token"]
         assert (await client.get("/api/v1/organizations")).status_code == 200
         assert (
             await client.post("/api/v1/auth/logout", headers={"X-CSRF-Token": "wrong"})
@@ -120,6 +128,39 @@ async def test_verification_reset_and_revocation(app):
         assert (await client.get("/api/v1/auth/me")).status_code == 401
 
 
+async def test_verification_replaces_the_credentials_of_a_legacy_unverified_account(app):
+    email = f"pending-{uuid4()}@example.com"
+    previous = "пароль прежней попытки"
+    legacy_cookie = uuid4().hex
+    async with unit_of_work(app.state.session_factory) as db:
+        user = User(email=email, password_hash=hasher.hash(previous), email_verified=False)
+        db.add(user)
+        await db.flush()
+        db.add(
+            Session(
+                user_id=user.id,
+                token_hash=digest(legacy_cookie),
+                expires_at=datetime.now(UTC) + timedelta(days=7),
+                absolute_expires_at=datetime.now(UTC) + timedelta(days=30),
+            )
+        )
+    async with client_for(app) as client, client_for(app) as legacy:
+        legacy.cookies.set(COOKIE, legacy_cookie)
+        assert (await legacy.get("/api/v1/organizations")).status_code == 403
+        assert (
+            await client.post("/api/v1/auth/register", json={"email": email})
+        ).status_code == 202
+        token = await mail_token(app, email, "Подтверждение")
+        setup = {"token": token, "password": PASSWORD}
+        assert (await client.post("/api/v1/auth/verify-email", json=setup)).status_code == 204
+        assert (await legacy.get("/api/v1/auth/me")).status_code == 401
+        for password, status in ((previous, 401), (PASSWORD, 200)):
+            result = await client.post(
+                "/api/v1/auth/login", json={"email": email, "password": password}
+            )
+            assert result.status_code == status
+
+
 async def test_rate_limit_persists_failed_attempts(app):
     async with client_for(app) as client:
         body = {"email": f"missing-{uuid4()}@example.com", "password": PASSWORD}
@@ -128,7 +169,7 @@ async def test_rate_limit_persists_failed_attempts(app):
         result = await client.post("/api/v1/auth/login", json=body)
         assert result.status_code == 429
         assert int(result.headers["retry-after"]) > 0
-        result = await client.post("/api/v1/auth/register", json={**body, "password": "pa55!"})
+        result = await client.post("/api/v1/auth/login", json={**body, "password": "pa55!"})
         assert result.status_code == 422
         assert "pa55!" not in result.text
         assert '"input"' not in result.text
