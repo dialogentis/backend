@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from dialogentis.db import unit_of_work
 from dialogentis.jobs.models import Job, OutboxEvent
+from dialogentis.models import Organization
 
 MAX_ATTEMPTS = 4
 MAX_DELIVERY_RECOVERIES = 3
@@ -113,6 +114,8 @@ async def heartbeat(factory: async_sessionmaker[AsyncSession], current: Claim) -
 
 async def complete(factory: async_sessionmaker[AsyncSession], current: Claim, apply: Apply) -> bool:
     async with unit_of_work(factory, organization_id=current.organization_id) as db:
+        # Tenant deletion takes the organization lock before touching any job.
+        await db.get(Organization, current.organization_id, with_for_update=True)
         job = await db.scalar(select(Job).where(Job.id == current.job_id).with_for_update())
         if job is None or job.status != "running" or job.execution_token != current.token:
             return False
