@@ -10,6 +10,7 @@ from sqlalchemy.exc import IntegrityError
 from dialogentis.auth.security import VerifiedUser
 from dialogentis.contracts import CursorPage, InputModel, revision_etag
 from dialogentis.dependencies import Database
+from dialogentis.flow_schema import DEFAULT_FALLBACK_TEXT
 from dialogentis.models import Agent, AgentDraft
 from dialogentis.organizations import audit, organization_context
 from dialogentis.versions.release_models import ReleaseVersion
@@ -114,7 +115,7 @@ def empty_config() -> dict:
                     "type": "fallback",
                     "config": {
                         "resume_node_id": switch,
-                        "text": "Не удалось распознать запрос. Попробуйте переформулировать.",
+                        "text": DEFAULT_FALLBACK_TEXT,
                     },
                     "position": {"x": 500, "y": 0},
                 },
@@ -265,7 +266,7 @@ def copy_config(config: dict) -> dict:
     allowed = {
         "start": set(),
         "switch_intent": set(),
-        "fallback": {"resume_node_id", "text", "example"},
+        "fallback": {"resume_node_id", "text", "example", "reply_instruction"},
         "say": {"text"},
         "end": {"text"},
         "ask_slot": {"slot_id", "prompt", "entity_id", "max_attempts", "checks"},

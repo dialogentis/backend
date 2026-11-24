@@ -178,9 +178,12 @@ def validate_flow(config: dict) -> tuple[list[Issue], list[Issue]]:
 
     for index, node in enumerate(flow.nodes):
         path = ("flow", "nodes", index)
+        guidance = node.config.get("reply_instruction")
+        generated_fallback = node.type == "fallback" and isinstance(guidance, str)
         if node.type in {"say", "fallback", "end"}:
             text = node.config.get("text")
-            if node.type != "end" and (not isinstance(text, str) or not text.strip()):
+            required_text = node.type != "end" and not generated_fallback
+            if required_text and (not isinstance(text, str) or not text.strip()):
                 errors.append(
                     Issue((*path, "config", "text"), "missing_text", "Укажите текст ответа")
                 )
@@ -306,15 +309,26 @@ def validate_flow(config: dict) -> tuple[list[Issue], list[Issue]]:
                                 )
                             )
         if node.type == "fallback":
-            example = node.config.get("example")
-            if example is None or (isinstance(example, str) and not example.strip()):
-                warnings.append(
+            if "reply_instruction" in node.config and (
+                not isinstance(guidance, str) or len(guidance) > 1000
+            ):
+                errors.append(
                     Issue(
-                        (*path, "config", "example"),
-                        "missing_fallback_example",
-                        "Добавьте пример запроса для повторных ошибок распознавания",
+                        (*path, "config", "reply_instruction"),
+                        "invalid_reply_instruction",
+                        "Инструкция для свободного ответа должна быть не длиннее 1000 символов",
                     )
                 )
+            example = node.config.get("example")
+            if example is None or (isinstance(example, str) and not example.strip()):
+                if not generated_fallback:
+                    warnings.append(
+                        Issue(
+                            (*path, "config", "example"),
+                            "missing_fallback_example",
+                            "Добавьте пример запроса для повторных ошибок распознавания",
+                        )
+                    )
             elif not isinstance(example, str) or len(example) > 500:
                 errors.append(
                     Issue(

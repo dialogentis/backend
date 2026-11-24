@@ -156,7 +156,7 @@ def test_entity_value_can_be_taken_from_an_answer_and_bad_spans_are_rejected():
 
     def predict(_):
         return DialogueDecision(
-            action="continue", intent=None, values=(value("order_id", "столица"),)
+            action="continue", intent=None, reply=None, values=(value("order_id", "столица"),)
         )
 
     engine = RuntimeEngine(version, config, predict)
@@ -167,7 +167,7 @@ def test_entity_value_can_be_taken_from_an_answer_and_bad_spans_are_rejected():
         version,
         config,
         lambda _: DialogueDecision(
-            action="continue", intent=None, values=(value("order_id", "SECRET"),)
+            action="continue", intent=None, reply=None, values=(value("order_id", "SECRET"),)
         ),
     )
     result = bad.send(bad.start().state, "столица")

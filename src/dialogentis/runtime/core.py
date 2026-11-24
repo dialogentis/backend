@@ -16,7 +16,7 @@ from dialogentis.conditions import ConditionConfig, choose_branch
 from dialogentis.datasets.preview import preview_entity
 from dialogentis.datasets.schema import Entity, Example, Intent
 from dialogentis.datasets.validation import normalize_example
-from dialogentis.flow_schema import Flow, FlowNode
+from dialogentis.flow_schema import DEFAULT_FALLBACK_TEXT, Flow, FlowNode
 from dialogentis.flow_validation import validate_flow
 from dialogentis.handoff import MAX_HANDOFF_DEPTH, HandoffConfig, ReturnConfig, check_mapping
 from dialogentis.http_action import (
@@ -367,6 +367,7 @@ class RuntimeEngine:
         deadline = monotonic() + MAX_SECONDS
         original_text = text
         dialogue_values: dict[str, DialogueValue] = {}
+        fallback_reply: str | None = None
         path = path if path is not None else [self]
         callers = callers if callers is not None else []
         history_sources = history_sources if history_sources is not None else []
@@ -507,6 +508,12 @@ class RuntimeEngine:
                     entity=active._entity_by_id[ask.entity_id].name if ask.entity_id else None,
                 )
             safe_text = redactor()(message)[:2000]
+            fallback = active._nodes.get(active._edges.get((node.id, "fallback"), node.id))
+            guidance = (
+                fallback.config.get("reply_instruction")
+                if node.type == "switch_intent" and fallback and fallback.type == "fallback"
+                else None
+            )
             request = DialogueTurn(
                 version_id=active._version,
                 node_id=node.id,
@@ -518,6 +525,7 @@ class RuntimeEngine:
                 choices=choices,
                 fields=tuple(fields.values())[:32],
                 awaiting=ask_slot.code if ask_slot is not None else None,
+                fallback_instruction=guidance if isinstance(guidance, str) else None,
             )
             try:
                 decision = active._understand(request)
@@ -573,7 +581,7 @@ class RuntimeEngine:
                         "start": set(),
                         "switch_intent": set(),
                         "say": {"text"},
-                        "fallback": {"text", "resume_node_id", "example"},
+                        "fallback": {"text", "resume_node_id", "example", "reply_instruction"},
                         "end": {"text"},
                     }[node.type]
                     if set(node.config) - allowed:
@@ -595,6 +603,7 @@ class RuntimeEngine:
                     dialogue_values = {value.code: value for value in decision.values}
                     text = None
                     if intent_id is None:
+                        fallback_reply = decision.reply
                         record(
                             TraceEvent(
                                 node.id,
@@ -734,10 +743,20 @@ class RuntimeEngine:
                     record(TraceEvent(node.id, node.type, "wait"))
                     return result("waiting_input")
                 elif node.type == "fallback":
-                    messages.append(
-                        render_template(str(node.config["text"]), active._slots, values)
-                    )
-                    fallback_count += 1
+                    if fallback_reply is not None:
+                        messages.append(fallback_reply)
+                        fallback_reply = None
+                        fallback_count = 0
+                        record(TraceEvent(node.id, node.type, "generated_reply"))
+                    else:
+                        text_template = node.config.get("text")
+                        reply = (
+                            render_template(text_template, active._slots, values)
+                            if isinstance(text_template, str) and text_template.strip()
+                            else DEFAULT_FALLBACK_TEXT
+                        )
+                        messages.append(reply)
+                        fallback_count += 1
                     if fallback_count >= 3:
                         example = node.config.get("example")
                         if isinstance(example, str) and example.strip():

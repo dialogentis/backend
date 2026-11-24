@@ -418,7 +418,9 @@ class TestChatService:
                     lambda: RuntimeEngine(
                         selected,
                         bundle.snapshot["config"],
-                        lambda _: DialogueDecision(action="clarify", intent=None, values=()),
+                        lambda _: DialogueDecision(
+                            action="clarify", intent=None, values=(), reply=None
+                        ),
                     ).initial_state()
                 )
                 reserved = await reserve_initial_turn(

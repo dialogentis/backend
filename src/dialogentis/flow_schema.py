@@ -5,6 +5,8 @@ from pydantic import Field, JsonValue
 
 from dialogentis.contracts import InputModel
 
+DEFAULT_FALLBACK_TEXT = "Не удалось распознать запрос. Попробуйте переформулировать."
+
 
 class Position(InputModel):
     x: float = Field(allow_inf_nan=False)

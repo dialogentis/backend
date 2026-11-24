@@ -72,11 +72,11 @@ def request_data():
 
 
 def clarify(_):
-    return DialogueDecision(action="clarify", intent=None, values=())
+    return DialogueDecision(action="clarify", intent=None, values=(), reply=None)
 
 
 def route(code="order", *values):
-    return DialogueDecision(action="route", intent=code, values=values)
+    return DialogueDecision(action="route", intent=code, values=values, reply=None)
 
 
 def value(code, text, source=None):
@@ -87,7 +87,7 @@ def answer(turn):
     if not turn.awaiting:
         return clarify(turn)
     return DialogueDecision(
-        action="continue", intent=None, values=(value(turn.awaiting, turn.text),)
+        action="continue", intent=None, reply=None, values=(value(turn.awaiting, turn.text),)
     )
 
 

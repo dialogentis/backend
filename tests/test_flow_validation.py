@@ -9,6 +9,20 @@ def codes(issues):
     return {item.code for item in issues}
 
 
+def test_generated_fallback_needs_neither_fixed_text_nor_example():
+    config = empty_config()
+    fallback = config["flow"]["nodes"][2]["config"]
+    fallback["reply_instruction"] = "Отвечай как поддержка заказов"
+    del fallback["text"]
+    errors, warnings = validate_flow(config)
+    assert not errors and "missing_fallback_example" not in codes(warnings)
+
+    fallback.pop("reply_instruction")
+    errors, warnings = validate_flow(config)
+    assert "missing_text" in codes(errors)
+    assert "missing_fallback_example" in codes(warnings)
+
+
 def node(kind):
     return {"id": str(uuid4()), "type": kind, "config": {}, "position": {"x": 0, "y": 0}}
 

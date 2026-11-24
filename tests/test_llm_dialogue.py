@@ -8,6 +8,7 @@ from openai import AsyncOpenAI
 
 from dialogentis.agents import empty_config
 from dialogentis.config import Settings
+from dialogentis.flow_schema import DEFAULT_FALLBACK_TEXT
 from dialogentis.nlu import llm
 from dialogentis.nlu.dialogue import DialogueChoice, DialogueTurn
 from dialogentis.nlu.model_store import ModelIdentity, pack_dialogue_manifest
@@ -74,7 +75,7 @@ async def test_deepseek_recovers_from_transport_failure_and_validates_choices(ll
     script.extend(
         [
             httpx2.ReadError("Connection closed"),
-            {"action": "route", "intent": "unavailable", "values": []},
+            {"action": "route", "intent": "unavailable", "values": [], "reply": None},
         ]
     )
     settings = Settings.model_validate(
@@ -105,10 +106,11 @@ async def test_language_model_can_switch_branch_and_extract_grounded_slot(llm_tr
     requests, script = llm_transport
     script.extend(
         [
-            {"action": "route", "intent": "check_order", "values": []},
+            {"action": "route", "intent": "check_order", "values": [], "reply": None},
             {
                 "action": "route",
                 "intent": "cancel_order",
+                "reply": None,
                 "values": [{"code": "number", "value": "42", "source": "сорок два"}],
             },
         ]
@@ -123,7 +125,9 @@ async def test_language_model_can_switch_branch_and_extract_grounded_slot(llm_tr
         }
     )
     config = empty_config()
-    _, router, _, end = config["flow"]["nodes"]
+    _, router, fallback, end = config["flow"]["nodes"]
+    fallback["config"]["reply_instruction"] = "Говори кратко"
+    fallback["config"]["text"] = ""
     check, cancel, slot = (str(uuid4()) for _ in range(3))
     config["intents"] = [
         {"id": check, "code": "check_order", "name": "Статус заказа"},
@@ -197,12 +201,29 @@ async def test_language_model_can_switch_branch_and_extract_grounded_slot(llm_tr
         prompt = json.loads(requests[0]["messages"][-1]["content"])
         assert prompt["text"].endswith("[скрыто]") and "input_hash" not in prompt
 
-        script.append({"action": "route", "intent": "unauthorized", "values": []})
+        script.append({"action": "route", "intent": "unauthorized", "values": [], "reply": None})
         invalid = await runtime.execute(
             action="send", state=first.state, text="Переключи ветку", **args
         )
         assert any(item.event == "fallback" for item in invalid.trace)
         assert all(item.intent_id is None for item in invalid.nlu_observations)
+        assert invalid.messages == (DEFAULT_FALLBACK_TEXT,)
+
+        script.extend(
+            [{"action": "answer", "intent": None, "values": [], "reply": "Небо голубое."}] * 3
+        )
+        current = invalid.state
+        for _ in range(3):
+            free_reply = await runtime.execute(
+                action="send", state=current, text="Почему небо голубое?", **args
+            )
+            assert free_reply.messages == ("Небо голубое.",)
+            assert free_reply.state.status == "waiting_input"
+            assert free_reply.state.fallback_count == 0
+            assert any(event.event == "generated_reply" for event in free_reply.trace)
+            current = free_reply.state
+        prompt = json.loads(requests[-1]["messages"][-1]["content"])
+        assert prompt["fallback_instruction"] == "Говори кратко"
 
         script.append(503)
         failed = await runtime.execute(

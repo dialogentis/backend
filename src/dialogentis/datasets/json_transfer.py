@@ -54,7 +54,7 @@ class PortableConfig(InputModel):
         allowed = {
             "start": set(),
             "switch_intent": set(),
-            "fallback": {"resume_node_id", "text", "example"},
+            "fallback": {"resume_node_id", "text", "example", "reply_instruction"},
             "say": {"text"},
             "end": {"text"},
             "ask_slot": {"slot_id", "prompt", "entity_id", "max_attempts", "checks"},
@@ -90,6 +90,11 @@ class PortableConfig(InputModel):
                 not isinstance(node.config["example"], str) or len(node.config["example"]) > 500
             ):
                 raise ValueError("Invalid fallback example")
+            if "reply_instruction" in node.config and (
+                not isinstance(node.config["reply_instruction"], str)
+                or len(node.config["reply_instruction"]) > 1000
+            ):
+                raise ValueError("Invalid fallback reply instruction")
             if node.type == "condition":
                 condition = ConditionDraftConfig.model_validate(node.config)
                 validate_draft_condition(condition, {slot.id: slot for slot in self.slots})
