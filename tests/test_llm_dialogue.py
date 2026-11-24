@@ -9,6 +9,7 @@ from openai import AsyncOpenAI
 from dialogentis.agents import empty_config
 from dialogentis.config import Settings
 from dialogentis.nlu import llm
+from dialogentis.nlu.dialogue import DialogueChoice, DialogueTurn
 from dialogentis.nlu.model_store import ModelIdentity, pack_dialogue_manifest
 from dialogentis.runtime.executor import RuntimeExecutor
 from dialogentis.runtime.history_context import ContextMessage, HistoryContext
@@ -64,6 +65,32 @@ def llm_transport(monkeypatch):
     monkeypatch.setattr(llm, "AsyncOpenAI", client)
     yield bodies, script
     llm._agent.cache_clear()
+
+
+async def test_deepseek_uses_json_mode_and_validates_choices(llm_transport):
+    requests, script = llm_transport
+    script.append({"action": "route", "intent": "unavailable", "values": []})
+    settings = Settings.model_validate(
+        {
+            "llm_base_url": "https://api.deepseek.com/v1",
+            "llm_model": "deepseek-flash",
+            "llm_api_key": "test-key",
+        }
+    )
+    turn = DialogueTurn(
+        version_id=uuid4(),
+        node_id=uuid4(),
+        text="Где моя посылка?",
+        choices=(DialogueChoice(code="order", name="Статус заказа", description="Проверка"),),
+        fields=(),
+    )
+
+    assert (await llm.interpret(settings, "deepseek-flash", turn)).action == "clarify"
+    assert len(requests) == 1
+    body = requests[0]
+    assert body["response_format"] == {"type": "json_object"}
+    assert body["max_tokens"] == 1024 and "max_completion_tokens" not in body
+    assert body["thinking"] == {"type": "disabled"} and not body.get("tools")
 
 
 async def test_language_model_can_switch_branch_and_extract_grounded_slot(llm_transport, caplog):

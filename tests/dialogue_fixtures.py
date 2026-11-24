@@ -59,7 +59,16 @@ def request_data():
     config.update(training_dataset().model_dump(mode="json"))
     identity = ModelIdentity(uuid4(), uuid4(), uuid4(), uuid4())
     snapshot = {"schema_version": 1, "config": config, "llm_model": "fixture"}
-    return identity, snapshot, Settings(encryption_key=Fernet.generate_key().decode())
+    return (
+        identity,
+        snapshot,
+        Settings(
+            encryption_key=Fernet.generate_key().decode(),
+            llm_base_url="",
+            llm_model="",
+            llm_api_key=None,
+        ),
+    )
 
 
 def clarify(_):

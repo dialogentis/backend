@@ -3,10 +3,11 @@
 import asyncio
 import logging
 from functools import lru_cache
+from urllib.parse import urlsplit
 
 from openai import APIConnectionError, AsyncOpenAI
 from pydantic import SecretStr
-from pydantic_ai import Agent, NativeOutput, UsageLimits
+from pydantic_ai import Agent, NativeOutput, PromptedOutput, UsageLimits
 from pydantic_ai.exceptions import AgentRunError, UnexpectedModelBehavior
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.profiles.openai import OpenAIModelProfile
@@ -26,6 +27,7 @@ Use only field codes in fields. Extract values from the latest message. Each val
 include source, the exact substring that provides the value. Output strings without prose.
 Normalize dates to YYYY-MM-DD and decimal numbers with a dot.
 Never generate an answer to the end user or propose actions beyond the given choices.
+Example JSON for an unclear request: {"action":"clarify","intent":null,"values":[]}
 """
 
 
@@ -42,6 +44,22 @@ def _agent(base_url: str, model: str, key: SecretStr | None):
             max_retries=0,
         )
     )
+    if urlsplit(base_url).hostname == "api.deepseek.com":
+        backend = OpenAIChatModel(
+            model,
+            provider=provider,
+            profile=OpenAIModelProfile(
+                supports_json_object_output=True,
+                openai_chat_supports_max_completion_tokens=False,
+            ),
+            settings={"extra_body": {"thinking": {"type": "disabled"}}},
+        )
+        return Agent(
+            backend,
+            output_type=PromptedOutput(DialogueDecision),
+            instructions=INSTRUCTIONS,
+            retries=0,
+        )
     backend = OpenAIChatModel(
         model, provider=provider, profile=OpenAIModelProfile(supports_json_schema_output=True)
     )

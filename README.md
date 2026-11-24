@@ -27,18 +27,22 @@ docker compose --profile dev up --build -d
 
 ## Языковая модель
 
-API обращается к LLM через OpenAI-совместимый API Chat Completions с поддержкой
-\`response_format\` типа \`json_schema\`. Укажите в \`.env\` или \`.env.production\`:
+API обращается к LLM через OpenAI-совместимый API Chat Completions. Для провайдеров
+с поддержкой
+`response_format` типа `json_schema` укажите в `.env` или `.env.production`:
 
-\`\`\`dotenv
+```dotenv
 LLM_BASE_URL=http://host.docker.internal:11434/v1
 LLM_MODEL=<имя модели у провайдера>
 LLM_API_KEY=
-\`\`\`
+```
 
 Пример адреса рассчитан на сервер модели на хосте Docker Desktop. На Linux укажите адрес,
 доступный из контейнера API. Если провайдер требует аутентификацию, передайте его ключ через
-\`LLM_API_KEY\`. После изменения параметров пересоздайте контейнер API.
+`LLM_API_KEY`. После изменения параметров пересоздайте контейнер API.
+
+Для DeepSeek задайте `LLM_BASE_URL=https://api.deepseek.com`, `LLM_MODEL=deepseek-flash`
+и `LLM_API_KEY`. Dialogentis запрашивает JSON и проверяет его по схеме PydanticAI.
 
 Модель получает сообщение, доступные ветки, описания параметров и недавние реплики, если в
 организации включено хранение текста. Она выбирает разрешённое намерение и предлагает значения
