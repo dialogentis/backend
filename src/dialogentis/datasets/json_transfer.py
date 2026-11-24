@@ -18,7 +18,6 @@ from dialogentis.handoff import (
     validate_handoff_references,
 )
 from dialogentis.http_action import HTTP_OUTPUTS, HttpActionDraftConfig, validate_http_references
-from dialogentis.nlu.settings import NLUSettings, QualitySettings
 from dialogentis.set_slot import SetSlotDraftConfig
 from dialogentis.slots import Slot, validate_slots
 
@@ -29,8 +28,6 @@ class PortableConfig(InputModel):
     examples: list[Example] = Field(max_length=13000)
     slots: list[Slot]
     flow: Flow
-    nlu_settings: NLUSettings = Field(default_factory=NLUSettings)
-    quality_settings: QualitySettings = Field(default_factory=QualitySettings)
 
     @field_validator("flow", mode="before")
     @classmethod
@@ -182,13 +179,6 @@ def _safe_path(path: tuple) -> tuple[str | int, ...]:
         "examples",
         "slots",
         "flow",
-        "nlu_settings",
-        "score",
-        "margin",
-        "similarity",
-        "quality_settings",
-        "intent_f1",
-        "entity_f1",
         "id",
         "code",
         "name",
@@ -274,11 +264,6 @@ def preview_json(
     if mode == "merge":
         if imported.flow != current.flow or imported.slots != current.slots:
             warnings.append(JsonIssue(("config", "flow"), "flow_not_imported"))
-        if (imported.nlu_settings, imported.quality_settings) != (
-            current.nlu_settings,
-            current.quality_settings,
-        ):
-            warnings.append(JsonIssue(("config",), "settings_not_imported"))
         try:
             dataset = Dataset(
                 intents=[*current.intents, *imported.intents],
@@ -293,8 +278,6 @@ def preview_json(
             examples=dataset.examples,
             slots=current.slots,
             flow=current.flow,
-            nlu_settings=current.nlu_settings,
-            quality_settings=current.quality_settings,
         )
     else:
         candidate = imported

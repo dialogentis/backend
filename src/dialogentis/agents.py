@@ -193,7 +193,11 @@ async def list_agents(
 
 @router.post("", status_code=201, response_model=AgentView)
 async def create_agent(
-    org_id: UUID, body: AgentInput, user: VerifiedUser, db: Database, response: Response
+    org_id: UUID,
+    body: AgentInput,
+    user: VerifiedUser,
+    db: Database,
+    response: Response,
 ):
     await organization_context(db, user, org_id, "manage_agents", lock=True)
     agent = Agent(
@@ -205,7 +209,8 @@ async def create_agent(
             await db.flush()
     except IntegrityError as exc:
         raise HTTPException(409, "Адрес агента уже занят") from exc
-    draft = AgentDraft(organization_id=org_id, agent_id=agent.id, configuration=empty_config())
+    config = empty_config()
+    draft = AgentDraft(organization_id=org_id, agent_id=agent.id, configuration=config)
     db.add(draft)
     await db.flush()
     audit(db, org_id, user, "agent.created", agent.id)

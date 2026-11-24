@@ -178,7 +178,9 @@ async def preview_draft_entity(
     if entity is None:
         raise HTTPException(404, "Сущность не найдена")
     if entity.method == "learned":
-        raise HTTPException(422, "Для проверки этой сущности требуется обученная версия")
+        raise HTTPException(
+            422, "Сущность, распознаваемую языковой моделью, можно проверить в чате агента"
+        )
     try:
         return await run_preview(entity, body.text, request.app.state.entity_preview_slots)
     except TimeoutError as exc:

@@ -1,4 +1,3 @@
-import asyncio
 import json
 import os
 from uuid import UUID, uuid4
@@ -11,6 +10,7 @@ from dialogentis.db import unit_of_work
 from dialogentis.jobs.models import OutboxEvent
 from dialogentis.jobs.tasks import process_job
 from dialogentis.jobs.training_tasks import HANDLERS
+from dialogentis.nlu.llm import DialogueUnavailable
 from dialogentis.runtime.executor import RuntimeExecutor
 from dialogentis.runtime.history_models import HistoryTurn
 from dialogentis.runtime.models import TestConversation as ConversationRecord
@@ -56,22 +56,8 @@ async def test_nlu_exception_does_not_retain_or_publish_private_input(app, monke
         async with unit_of_work(factory, organization_id=org_id) as db:
             before = set(await db.scalars(select(OutboxEvent.id)))
 
-        program = """
-from dialogentis.runtime import child
-
-def predictor(_):
-    def fail(message):
-        raise RuntimeError(message.text)
-    return fail
-
-child.nlu_predictor = predictor
-child.main()
-"""
-        spawn = asyncio.create_subprocess_exec
-
-        async def failing_model(executable, *args, **kwargs):
-            assert args == ("-m", "dialogentis.runtime.child")
-            return await spawn(executable, "-c", program, **kwargs)
+        async def failing_model(settings, model, turn):
+            raise DialogueUnavailable(turn.text)
 
         marker = f"private-nlu-{uuid4().hex}"
         broker_url = app.state.settings.broker_url
@@ -92,9 +78,7 @@ child.main()
                 patch.setattr(
                     logger, "log", lambda _level, record: records.append(json.loads(record))
                 )
-                patch.setattr(
-                    "dialogentis.runtime.executor.asyncio.create_subprocess_exec", failing_model
-                )
+                patch.setattr("dialogentis.runtime.executor.interpret", failing_model)
                 result = await owner.post(
                     f"{base}/test-conversations/{identifier}/messages",
                     json={"client_message_id": str(uuid4()), "revision": 1, "text": marker},

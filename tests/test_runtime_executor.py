@@ -6,12 +6,11 @@ from uuid import UUID, uuid4
 import pytest
 
 from dialogentis.http_action import HTTP_OUTPUTS
-from dialogentis.runtime.child import ModelCache
+from dialogentis.nlu.model_store import pack_dialogue_manifest
 from dialogentis.runtime.core import RuntimeState
 from dialogentis.runtime.executor import ExecutionError, RuntimeExecutor
-from dialogentis.training.worker import run_child
 from dialogentis.versions.prepare import canonical_hash
-from tests.test_training_child import request_data
+from tests.dialogue_fixtures import request_data
 
 
 @pytest.fixture
@@ -26,12 +25,9 @@ async def executor():
 async def test_child_reuses_signed_model_but_rejects_wrong_identity_or_snapshot(
     executor, monkeypatch
 ):
-    request, identity, snapshot, settings = request_data()
+    identity, snapshot, settings = request_data()
 
-    async def progress(_):
-        pass
-
-    model, _ = await run_child(request, settings, progress)
+    model = pack_dialogue_manifest(identity, canonical_hash(snapshot), settings)
     spawn = asyncio.create_subprocess_exec
     children = []
 
@@ -85,35 +81,9 @@ async def test_child_reuses_signed_model_but_rejects_wrong_identity_or_snapshot(
     assert len(children) == 2 and children[1].returncode is not None
 
 
-def test_model_cache_evicts_least_recent_and_checks_identity_and_bytes(monkeypatch):
-    _, identity, _, settings = request_data()
-    other = replace(identity, organization_id=uuid4())
-    cached = ModelCache(settings, limit=6)
-    calls = []
-
-    def unpack(artifact, identity, settings):
-        calls.append((artifact, identity))
-        return object()
-
-    monkeypatch.setattr("dialogentis.runtime.child.unpack_model", unpack)
-    first = cached.load(identity, b"one")
-    cached.load(identity, b"two")
-    assert cached.load(identity, b"one") is first
-    assert cached.load(other, b"one") is not first
-    assert cached.size == 6
-    cached.load(identity, b"two")
-    assert calls == [(b"one", identity), (b"two", identity), (b"one", other), (b"two", identity)]
-    cached.load(identity, b"too big")
-    assert cached.size == 6
-
-
 async def test_http_bridge_validates_and_bounds_private_action_exchange(executor):
-    request, identity, snapshot, settings = request_data()
+    identity, snapshot, settings = request_data()
 
-    async def progress(_):
-        pass
-
-    model, _ = await run_child(request, settings, progress)
     config = snapshot["config"]
     source_id, target_id, action_id, say_id = (str(uuid4()) for _ in range(4))
     config["slots"] = [
@@ -154,6 +124,7 @@ async def test_http_bridge_validates_and_bounds_private_action_exchange(executor
         {"id": str(uuid4()), "source": say_id, "source_handle": "next", "target": switch["id"]}
     )
     seen = []
+    model = pack_dialogue_manifest(identity, canonical_hash(snapshot), settings)
 
     async def handler(node_id, values):
         seen.append((node_id, values))
@@ -197,7 +168,7 @@ async def test_http_bridge_validates_and_bounds_private_action_exchange(executor
 
 
 async def test_http_bridge_rejects_action_not_in_snapshot(monkeypatch):
-    _, identity, snapshot, settings = request_data()
+    identity, snapshot, settings = request_data()
     original = asyncio.create_subprocess_exec
     program = """
 import json, struct, sys
@@ -230,7 +201,7 @@ sys.stdin.buffer.read()
 
 
 async def test_timeout_kills_subprocess_and_does_not_leak_input(monkeypatch):
-    _, identity, snapshot, settings = request_data()
+    identity, snapshot, settings = request_data()
     original = asyncio.create_subprocess_exec
     children = []
 
@@ -263,7 +234,7 @@ async def test_timeout_kills_subprocess_and_does_not_leak_input(monkeypatch):
 
 
 async def test_cancel_kills_child_and_limits_concurrency(monkeypatch):
-    _, identity, snapshot, settings = request_data()
+    identity, snapshot, settings = request_data()
     original = asyncio.create_subprocess_exec
     children = []
     started = asyncio.Event()
@@ -302,7 +273,7 @@ async def test_cancel_kills_child_and_limits_concurrency(monkeypatch):
 
 
 async def test_rejects_invalid_message_before_starting_child(monkeypatch):
-    _, identity, snapshot, settings = request_data()
+    identity, snapshot, settings = request_data()
     executor = RuntimeExecutor()
     state = RuntimeState(
         version_id=identity.version_id,

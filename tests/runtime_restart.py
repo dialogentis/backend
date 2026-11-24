@@ -24,6 +24,7 @@ from dialogentis.runtime import live_http
 from dialogentis.runtime.cleanup import recover_abandoned_turns
 from dialogentis.runtime.models import TestConversation
 from dialogentis.runtime.receipt_models import RuntimeReceipt
+from tests.dialogue_fixtures import install_provider
 
 
 @asynccontextmanager
@@ -156,6 +157,7 @@ if __name__ == "__main__":
             return IntegrationResponse(response.status_code, response.json())
 
     with pytest.MonkeyPatch.context() as patch:
+        install_provider(patch)
         patch.setattr(live_http, "request_json", send_to_peer)
         uvicorn.run(
             create_app(Settings(public_base_url="http://test")), uds=api_socket, access_log=False

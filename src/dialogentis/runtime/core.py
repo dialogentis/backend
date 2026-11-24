@@ -13,7 +13,8 @@ from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, Strict
 
 from dialogentis.ask_slot import AskSlotConfig
 from dialogentis.conditions import ConditionConfig, choose_branch
-from dialogentis.datasets.schema import Entity, Intent
+from dialogentis.datasets.preview import preview_entity
+from dialogentis.datasets.schema import Entity, Example, Intent
 from dialogentis.datasets.validation import normalize_example
 from dialogentis.flow_schema import Flow, FlowNode
 from dialogentis.flow_validation import validate_flow
@@ -24,6 +25,14 @@ from dialogentis.http_action import (
     MockIntegration,
     mock_http_action,
 )
+from dialogentis.nlu.dialogue import (
+    DialogueChoice,
+    DialogueDecision,
+    DialogueField,
+    DialogueTurn,
+    DialogueValue,
+    accepts_decision,
+)
 from dialogentis.runtime.history_context import HistoryContext
 from dialogentis.runtime.slot_values import SlotValueError, parse_slot_value, valid_value
 from dialogentis.set_slot import SetSlotConfig
@@ -32,13 +41,6 @@ from dialogentis.templates import TemplateError, render_template
 
 MAX_TRANSITIONS = 50
 MAX_SECONDS = 20
-FALLBACK_REASONS = {
-    "empty_features",
-    "low_score",
-    "ambiguous_intent",
-    "low_similarity",
-    "low_vocabulary_coverage",
-}
 SAFE_FAILURE = "Не удалось выполнить сценарий. Попробуйте позже."
 MASKED = "[скрыто]"
 
@@ -49,34 +51,12 @@ class RuntimeFault(ValueError):
         super().__init__(code)
 
 
-@dataclass(frozen=True)
-class EntityValue:
-    entity_id: UUID
-    start: int
-    end: int
-    text: str = field(repr=False)
-    source: str = ""
-
-
-@dataclass(frozen=True)
-class Prediction:
-    version_id: UUID
-    intent_id: UUID | None
-    fallback_reasons: tuple[str, ...] = ()
-    entities: tuple[EntityValue, ...] = field(default=(), repr=False)
-
-
-@dataclass(frozen=True)
-class RuntimeInput:
-    text: str = field(repr=False)
-    history: HistoryContext = field(default_factory=HistoryContext, repr=False)
-
-
 class FrameState(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     node_id: UUID
     fallback_count: int = Field(ge=0, le=3)
     pending_ask: UUID | None = None
+    routing_node: UUID | None = None
     slot_values: tuple[tuple[str, StrictBool | StrictInt | StrictStr | None], ...] = Field(
         default=(), repr=False
     )
@@ -169,7 +149,7 @@ class RuntimeEngine:
         self,
         version_id: UUID,
         config: dict,
-        predict: Callable[[RuntimeInput], Prediction],
+        understand: Callable[[DialogueTurn], DialogueDecision],
         *,
         mock_integrations: list[MockIntegration] | None = None,
         http_handler: Callable[[UUID, dict], tuple[str, dict]] | None = None,
@@ -182,6 +162,11 @@ class RuntimeEngine:
         try:
             self._flow = Flow.model_validate(config["flow"]).model_copy(deep=True)
             self._slots, slot_errors = validate_slots(config.get("slots", []))
+            self._examples = [
+                Example.model_validate(item)
+                for item in config.get("examples", [])
+                if item.get("split") == "train"
+            ]
             self._intents = [Intent.model_validate(item) for item in config.get("intents", [])]
             self._entities = [Entity.model_validate(item) for item in config.get("entities", [])]
         except ValidationError, ValueError, TypeError, KeyError:
@@ -194,7 +179,6 @@ class RuntimeEngine:
             raise RuntimeFault("invalid_flow")
         self._nodes = {node.id: node for node in self._flow.nodes}
         self._edges = {(edge.source, edge.source_handle): edge.target for edge in self._flow.edges}
-        self._enabled = {intent.id for intent in self._intents if intent.enabled}
         self._slot_by_code = {slot.code: slot for slot in self._slots}
         self._slot_by_id = {slot.id: slot for slot in self._slots}
         self._entity_by_id = {entity.id: entity for entity in self._entities}
@@ -235,7 +219,7 @@ class RuntimeEngine:
         except TypeError, ValueError, UnicodeError:
             raise RuntimeFault("invalid_flow") from None
         self._version = version_id
-        self._predict = predict
+        self._understand = understand
 
     def initial_state(self, values: dict | None = None) -> RuntimeState:
         if values is not None and not isinstance(values, dict):
@@ -315,6 +299,7 @@ class RuntimeEngine:
             path,
             list(state.callers),
             list(history_sources),
+            state.routing_node,
         )
 
     def _target(self, version_id: UUID) -> RuntimeEngine:
@@ -328,6 +313,11 @@ class RuntimeEngine:
             raise RuntimeFault("invalid_checkpoint")
         if state.pending_ask is not None and (
             state.pending_ask != state.node_id or state.pending_ask not in self._asks
+        ):
+            raise RuntimeFault("invalid_checkpoint")
+        if state.routing_node is not None and (
+            (router := self._nodes.get(state.routing_node)) is None
+            or router.type != "switch_intent"
         ):
             raise RuntimeFault("invalid_checkpoint")
         stored = dict(state.slot_values)
@@ -367,6 +357,7 @@ class RuntimeEngine:
         path: list[RuntimeEngine] | None = None,
         callers: list[SuspendedFrame] | None = None,
         history_sources: list[UUID | None] | None = None,
+        routing_node: UUID | None = None,
     ) -> RuntimeResult:
         messages: list[str] = []
         trace: list[TraceEvent] = []
@@ -375,8 +366,7 @@ class RuntimeEngine:
         http_actions = 0
         deadline = monotonic() + MAX_SECONDS
         original_text = text
-        last_prediction: Prediction | None = None
-        entity_consumed = False
+        dialogue_values: dict[str, DialogueValue] = {}
         path = path if path is not None else [self]
         callers = callers if callers is not None else []
         history_sources = history_sources if history_sources is not None else []
@@ -400,20 +390,17 @@ class RuntimeEngine:
         def record(event: TraceEvent) -> None:
             trace.append(replace(event, version_id=active._version))
 
-        def result(status: Literal["waiting_input", "completed", "failed"], code=None):
+        def redactor() -> Callable[[str], str]:
             tokens = sorted(private_values, key=lambda value: (-len(value), value))
-            redact_all = len(tokens) > 200 or sum(map(len, tokens)) > 40_000
-            pattern = (
-                re.compile("|".join(map(re.escape, tokens)), re.IGNORECASE)
-                if tokens and not redact_all
-                else None
-            )
+            if len(tokens) > 200 or sum(map(len, tokens)) > 40_000:
+                return lambda _: MASKED
+            if not tokens:
+                return lambda value: value[:4000]
+            pattern = re.compile("|".join(map(re.escape, tokens)), re.IGNORECASE)
+            return lambda value: pattern.sub(MASKED, value)[:4000]
 
-            def redact(value: str) -> str:
-                if redact_all:
-                    return MASKED
-                return (pattern.sub(MASKED, value) if pattern else value)[:4000]
-
+        def result(status: Literal["waiting_input", "completed", "failed"], code=None):
+            redact = redactor()
             return RuntimeResult(
                 state(status),
                 tuple(messages),
@@ -437,6 +424,7 @@ class RuntimeEngine:
                 turn=turn,
                 fallback_count=fallback_count,
                 pending_ask=pending_ask,
+                routing_node=routing_node if status == "waiting_input" else None,
                 slot_values=tuple(sorted(values.items())),
                 attempts=tuple((node, attempts[node]) for node in sorted(attempts, key=str)),
                 active_path=tuple(engine._version for engine in path[1:])
@@ -471,7 +459,7 @@ class RuntimeEngine:
             record(TraceEvent(node.id, node.type, "transition", handle))
             return target
 
-        def predict_message(message: str) -> Prediction:
+        def dialogue_history() -> HistoryContext:
             nonlocal active_history
             if active_history is None:
                 active_history = (
@@ -479,68 +467,98 @@ class RuntimeEngine:
                     if history_sources and (source := history_sources[-1]) and self._load_history
                     else HistoryContext()
                 )
+            return active_history
+
+        def understand(
+            message: str, node: FlowNode, router: UUID | None, ask_slot: Slot | None = None
+        ) -> DialogueDecision:
+            examples: dict[UUID, list[str]] = {}
+            for example in active._examples:
+                if example.intent_id is None:
+                    continue
+                phrases = examples.setdefault(example.intent_id, [])
+                if len(phrases) < 2:
+                    phrases.append(example.text[:240])
+            choices = tuple(
+                DialogueChoice(
+                    code=intent.code,
+                    name=intent.name,
+                    description=intent.description[:500],
+                    examples=tuple(examples.get(intent.id, ())),
+                )
+                for intent in active._intents
+                if intent.enabled
+                and router is not None
+                and (router, str(intent.id)) in active._edges
+            )
+            fields: dict[str, DialogueField] = {}
+            asks = list(active._asks.values())
+            if ask_slot is not None:
+                asks.insert(0, active._asks[node.id])
+            for ask in asks:
+                slot = active._slot_by_id[ask.slot_id]
+                if slot.sensitive or slot.value_type == "boolean" or slot.code in fields:
+                    continue
+                fields[slot.code] = DialogueField(
+                    code=slot.code,
+                    name=slot.name,
+                    value_type=slot.value_type,
+                    prompt=ask.prompt[:500],
+                    entity=active._entity_by_id[ask.entity_id].name if ask.entity_id else None,
+                )
+            safe_text = redactor()(message)[:2000]
+            request = DialogueTurn(
+                version_id=active._version,
+                node_id=node.id,
+                text=safe_text,
+                input_hash=hashlib.sha256(message.encode()).hexdigest()
+                if safe_text != message
+                else None,
+                history=dialogue_history(),
+                choices=choices,
+                fields=tuple(fields.values())[:32],
+                awaiting=ask_slot.code if ask_slot is not None else None,
+            )
             try:
-                nlu_observations.append(NLUObservation(version_id=active._version))
-                prediction = active._predict(RuntimeInput(message, active_history))
+                decision = active._understand(request)
+                if not accepts_decision(request, decision):
+                    raise ValueError("Invalid dialogue decision")
             except Exception:
                 raise RuntimeFault("nlu_error") from None
-            # shortcut: synchronous prediction needs a preemptive outer timeout.
             if monotonic() > deadline:
                 raise RuntimeFault("turn_timeout")
-            if not isinstance(prediction, Prediction):
-                raise RuntimeFault("invalid_nlu_result")
-            if prediction.version_id != active._version:
-                raise RuntimeFault("model_version_mismatch")
-            if (
-                not isinstance(prediction.fallback_reasons, tuple)
-                or any(
-                    not isinstance(reason, str) or reason not in FALLBACK_REASONS
-                    for reason in prediction.fallback_reasons
-                )
-                or not isinstance(prediction.entities, tuple)
-                or any(not isinstance(entity, EntityValue) for entity in prediction.entities)
-            ):
-                raise RuntimeFault("invalid_nlu_result")
-            if isinstance(prediction.intent_id, UUID) and prediction.intent_id in active._enabled:
-                nlu_observations[-1] = NLUObservation(
-                    version_id=active._version, intent_id=prediction.intent_id
-                )
-            return prediction
+            return decision
 
-        def entity_value(
-            ask: AskSlotConfig, slot: Slot, prediction: Prediction, message: str
-        ) -> str | int | bool | None:
-            if ask.entity_id is None:
-                return None
-            entity = active._entity_by_id[ask.entity_id]
-            matches = [item for item in prediction.entities if item.entity_id == entity.id]
-            if not matches:
-                return None
-            if len(matches) != 1:
-                raise SlotValueError("ambiguous_entity")
-            match = matches[0]
-            if (
-                type(match.start) is not int
-                or type(match.end) is not int
-                or not 0 <= match.start < match.end <= len(message)
-                or not isinstance(match.text, str)
-                or message[match.start : match.end] != match.text
-                or match.source != entity.method
-            ):
-                raise RuntimeFault("invalid_nlu_result")
-            value = match.text
-            if entity.method == "dictionary":
-                normalized = normalize_example(value)
-                entries = [
-                    entry.value
-                    for entry in entity.dictionary
-                    if normalized
-                    in {normalize_example(term) for term in (entry.value, *entry.synonyms)}
-                ]
-                if len(entries) != 1:
-                    raise RuntimeFault("invalid_nlu_result")
-                value = entries[0]
-            return parse_slot_value(slot, value, ask)
+        def route_decision(decision: DialogueDecision) -> UUID | None:
+            intent_id = next(
+                (intent.id for intent in active._intents if intent.code == decision.intent), None
+            )
+            nlu_observations.append(NLUObservation(version_id=active._version, intent_id=intent_id))
+            return intent_id
+
+        def parse_proposal(
+            slot: Slot, ask: AskSlotConfig, value: DialogueValue
+        ) -> str | int | bool:
+            entity = active._entity_by_id.get(ask.entity_id) if ask.entity_id else None
+            if entity is None or entity.method == "learned":
+                raw = value.source if slot.value_type == "string" else value.value
+            elif entity.method == "dictionary":
+                normalized = normalize_example(value.source)
+                raw = next(
+                    (
+                        entry.value
+                        for entry in entity.dictionary
+                        if normalized
+                        in {normalize_example(term) for term in (entry.value, *entry.synonyms)}
+                    ),
+                    "",
+                )
+            else:
+                matches = preview_entity(entity, original_text or "").matches
+                if not any(match.text == value.source for match in matches):
+                    raise SlotValueError()
+                raw = value.source
+            return parse_slot_value(slot, raw, ask)
 
         try:
             while True:
@@ -568,34 +586,27 @@ class RuntimeEngine:
                     )
                     node_id = move(node, "next")
                 elif node.type == "switch_intent":
+                    routing_node = node.id
                     if text is None:
                         record(TraceEvent(node.id, node.type, "wait"))
                         return result("waiting_input")
-                    prediction = predict_message(text)
-                    if prediction.intent_id is None:
-                        if not prediction.fallback_reasons:
-                            raise RuntimeFault("invalid_nlu_result")
+                    decision = understand(text, node, node.id)
+                    intent_id = route_decision(decision)
+                    dialogue_values = {value.code: value for value in decision.values}
+                    text = None
+                    if intent_id is None:
                         record(
                             TraceEvent(
                                 node.id,
                                 node.type,
                                 "fallback",
-                                fallback_reasons=prediction.fallback_reasons,
+                                fallback_reasons=("ambiguous_intent",),
                             )
                         )
-                        handle = "fallback"
+                        node_id = move(node, "fallback")
                     else:
-                        if (
-                            not isinstance(prediction.intent_id, UUID)
-                            or prediction.fallback_reasons
-                            or prediction.intent_id not in active._enabled
-                        ):
-                            raise RuntimeFault("invalid_nlu_result")
-                        handle = str(prediction.intent_id)
                         fallback_count = 0
-                    text = None
-                    last_prediction = prediction
-                    node_id = move(node, handle)
+                        node_id = move(node, str(intent_id))
                 elif node.type == "condition":
                     handle = choose_branch(active._conditions[node.id], active._slot_by_id, values)
                     node_id = move(node, handle)
@@ -660,6 +671,18 @@ class RuntimeEngine:
                     slot = active._slot_by_id[ask.slot_id]
                     if slot.sensitive and text is not None:
                         private_input = True
+                    if slot.code in dialogue_values:
+                        try:
+                            value = parse_proposal(slot, ask, dialogue_values.pop(slot.code))
+                        except SlotValueError:
+                            pass
+                        else:
+                            values[slot.code] = value
+                            fallback_count = 0
+                            attempts.pop(node.id, None)
+                            record(TraceEvent(node.id, node.type, "slot_filled", str(slot.id)))
+                            node_id = move(node, "success")
+                            continue
                     if valid_value(slot, values.get(slot.code), ask):
                         if pending_ask == node.id:
                             text = None
@@ -675,16 +698,22 @@ class RuntimeEngine:
                         input_consumed = True
                         pending_ask = None
                         try:
-                            extracted = (
-                                entity_value(ask, slot, predict_message(answer), answer)
-                                if ask.entity_id is not None
-                                else None
-                            )
-                            value = (
-                                extracted
-                                if extracted is not None
-                                else parse_slot_value(slot, answer, ask)
-                            )
+                            if slot.sensitive or slot.value_type == "boolean":
+                                value = parse_slot_value(slot, answer, ask)
+                            else:
+                                decision = understand(answer, node, routing_node, slot)
+                                understood = {value.code: value for value in decision.values}
+                                if decision.action == "route" and routing_node is not None:
+                                    intent_id = route_decision(decision)
+                                    attempts.clear()
+                                    dialogue_values = understood
+                                    fallback_count = 0
+                                    node_id = move(active._nodes[routing_node], str(intent_id))
+                                    continue
+                                if decision.action != "continue" or slot.code not in understood:
+                                    raise SlotValueError()
+                                value = parse_proposal(slot, ask, understood.pop(slot.code))
+                                dialogue_values = understood
                         except SlotValueError:
                             count = attempts.get(node.id, 0) + 1
                             if count >= ask.max_attempts:
@@ -700,25 +729,6 @@ class RuntimeEngine:
                         record(TraceEvent(node.id, node.type, "slot_filled", str(slot.id)))
                         node_id = move(node, "success")
                         continue
-                    if (
-                        last_prediction is not None
-                        and original_text is not None
-                        and not entity_consumed
-                    ):
-                        try:
-                            extracted = entity_value(ask, slot, last_prediction, original_text)
-                        except SlotValueError:
-                            extracted = None
-                        if extracted is not None:
-                            private_input = private_input or slot.sensitive
-                            values[slot.code] = extracted
-                            entity_consumed = True
-                            input_consumed = True
-                            fallback_count = 0
-                            attempts.pop(node.id, None)
-                            record(TraceEvent(node.id, node.type, "slot_filled", str(slot.id)))
-                            node_id = move(node, "success")
-                            continue
                     messages.append(render_template(ask.prompt, active._slots, values))
                     pending_ask = node.id
                     record(TraceEvent(node.id, node.type, "wait"))
@@ -794,6 +804,7 @@ class RuntimeEngine:
                                 node_id=node.id,
                                 fallback_count=fallback_count,
                                 pending_ask=pending_ask,
+                                routing_node=routing_node,
                                 slot_values=tuple(sorted(values.items())),
                                 attempts=tuple(attempts.items()),
                             )
@@ -802,12 +813,14 @@ class RuntimeEngine:
                     active = target
                     node_id, values, attempts = initial.node_id, dict(initial.slot_values), {}
                     fallback_count, pending_ask = 0, None
+                    routing_node = None
+                    dialogue_values.clear()
                     text = (
                         original_text
                         if config.forward_current_message and not input_consumed
                         else None
                     )
-                    original_text, last_prediction, entity_consumed = text, None, False
+                    original_text = text
                 elif node.type == "return" and callers:
                     caller = callers.pop()
                     parent = path[caller.path_index]
@@ -835,7 +848,9 @@ class RuntimeEngine:
                     node_id = caller.node_id
                     values, attempts = restored, dict(caller.attempts)
                     fallback_count, pending_ask = caller.fallback_count, caller.pending_ask
-                    text, original_text, last_prediction, entity_consumed = None, None, None, False
+                    routing_node = caller.routing_node
+                    dialogue_values.clear()
+                    text = original_text = None
                     node_id = move(active._nodes[node_id], branch)
                 elif node.type in {"end", "return"}:
                     text_value = node.config.get("text")

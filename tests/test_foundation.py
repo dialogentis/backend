@@ -7,7 +7,6 @@ from pydantic import ValidationError
 
 from dialogentis.api import create_app
 from dialogentis.config import Settings
-from dialogentis.nlu.smoke import check_nlu
 from dialogentis.telemetry import logger
 
 
@@ -55,7 +54,3 @@ def test_request_logs_omit_headers_query_and_unexpected_exception_details(monkey
 def test_production_fails_closed_without_config():
     with pytest.raises(ValidationError):
         Settings(_env_file=None, app_env="production")
-
-
-def test_nlu_dependencies_train_and_predict():
-    assert check_nlu() == {"intent": "ok", "crf": "ok", "regex": "ok"}

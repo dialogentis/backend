@@ -3,7 +3,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from benchmarks.nlu.demo import ANSWERS, SETTINGS, demo_config, load_demo_fixtures
+from benchmarks.nlu.demo import ANSWERS, demo_config, load_demo_fixtures
 from dialogentis.datasets.export_worker import serialize_export
 from dialogentis.jobs.tasks import process_job
 from dialogentis.jobs.training_tasks import HANDLERS
@@ -19,7 +19,7 @@ pytestmark = [
 
 
 @pytest.mark.parametrize("name", ["order_support", "education"])
-async def test_demo_agent_imports_trains_and_answers(app, name):
+async def test_demo_agent_imports_prepares_and_answers(app, name):
     fixture = load_demo_fixtures()[name]
     config = demo_config(name, fixture)
     factory = app.state.session_factory
@@ -52,7 +52,6 @@ async def test_demo_agent_imports_trains_and_answers(app, name):
             },
         )
         assert draft.status_code == 200, draft.text
-        assert draft.json()["config"]["nlu_settings"] == SETTINGS[name].model_dump()
 
         started = await owner.post(
             f"{agent}/versions",
@@ -65,17 +64,7 @@ async def test_demo_agent_imports_trains_and_answers(app, name):
         await process_job(factory, job_id, org_id, HANDLERS, "training")
         version = await owner.get(f"{agent}/versions/{version_id}")
         assert version.status_code == 200 and version.json()["status"] == "ready", version.text
-        report = await owner.get(f"{agent}/versions/{version_id}/report")
-        assert report.status_code == 200, report.text
-        quality = report.json()
-        assert quality["training_examples"] == sum(
-            len(intent["train"]) for intent in fixture["intents"]
-        )
-        assert quality["intents"]["known_count"] == 25
-        assert quality["intents"]["unknown_count"] == 20
-        assert quality["intents"]["macro_f1"] >= 0.85
-        assert quality["intents"]["unknown_rejection"] >= 0.80
-        assert quality["entities"]["f1"] >= 0.85
+        assert version.json()["llm_model"] == "fixture"
 
         opened = await owner.post(
             f"{agent}/test-conversations", json={"version_id": str(version_id)}

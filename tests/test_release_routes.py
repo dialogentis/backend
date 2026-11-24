@@ -19,9 +19,9 @@ from dialogentis.runtime.rate_limits import RateBucket
 from dialogentis.runtime.receipt_models import RuntimeReceipt
 from dialogentis.training import worker as training_worker
 from dialogentis.versions.release_models import Release, ReleaseVersion
+from tests.dialogue_fixtures import training_dataset
 from tests.test_auth import client_for
 from tests.test_exports import app as app
-from tests.test_nlu_intents import training_dataset
 from tests.test_runtime_handoff import call_flows
 from tests.test_versions import create_agent, prepare
 
@@ -123,7 +123,7 @@ async def test_release_gates_atomic_publication_pins_and_rollback(app, monkeypat
         )
         short_version = await train(root_id, root, 1, minimum=False)
         rejected = await owner.get(f"{root_url}/versions/{short_version}/release-check")
-        assert "release_test_minimum" in {item["code"] for item in rejected.json()["errors"]}
+        assert "release_test_minimum" not in {item["code"] for item in rejected.json()["errors"]}
 
         first_version = await train(root_id, root, 2)
         check_url = f"{root_url}/versions/{first_version}/release-check"
@@ -140,10 +140,6 @@ async def test_release_gates_atomic_publication_pins_and_rollback(app, monkeypat
             await editor.post(publish_url, json=request, headers={"If-Match": etag})
         ).status_code == 403
         assert (await owner.post(publish_url, json=request)).status_code == 428
-        warning = await owner.post(publish_url, json=request, headers={"If-Match": etag})
-        assert warning.status_code == 409
-        assert warning.json()["error"]["code"] == "release_quality_confirmation_required"
-        request.update(warning_acknowledgement=True, reason="Проверено вручную")
         first, concurrent = await asyncio.gather(
             owner.post(publish_url, json=request, headers={"If-Match": etag}),
             owner.post(publish_url, json=request, headers={"If-Match": etag}),
@@ -216,19 +212,16 @@ async def test_release_gates_atomic_publication_pins_and_rollback(app, monkeypat
         ]
         building = await prepare_training(root_id, root, 3)
         training_started, continue_training = asyncio.Event(), asyncio.Event()
-        run_child = training_worker.run_child
+        set_stage = training_worker.set_stage
 
-        async def signal_training(request, settings, progress):
-            async def track(stage):
-                await progress(stage)
-                if stage == "intent_training":
-                    training_started.set()
-                    await continue_training.wait()
-
-            return await run_child(request, settings, track)
+        async def signal_preparation(factory, claim, stage):
+            await set_stage(factory, claim, stage)
+            if stage == "packaging":
+                training_started.set()
+                await continue_training.wait()
 
         with monkeypatch.context() as patch:
-            patch.setattr(training_worker, "run_child", signal_training)
+            patch.setattr(training_worker, "set_stage", signal_preparation)
             async with asyncio.TaskGroup() as tasks:
                 task = tasks.create_task(build(building))
                 try:

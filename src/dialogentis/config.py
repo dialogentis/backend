@@ -35,9 +35,24 @@ class Settings(BaseSettings):
     smtp_from: str = "Dialogentis <no-reply@localhost>"
     max_training_jobs: int = 1
     max_body_bytes: int = 10 * 1024 * 1024 + 64 * 1024
+    llm_base_url: str = ""
+    llm_model: str = Field(default="", max_length=200)
+    llm_api_key: SecretStr | None = None
 
     @model_validator(mode="after")
     def validate_environment(self) -> Settings:
+        if self.llm_base_url or self.llm_model:
+            url = urlsplit(self.llm_base_url)
+            if (
+                not self.llm_model.strip()
+                or url.scheme not in {"http", "https"}
+                or not url.hostname
+                or url.username is not None
+                or url.password is not None
+                or url.query
+                or url.fragment
+            ):
+                raise ValueError("Set LLM_MODEL and an HTTP(S) LLM_BASE_URL without credentials")
         if self.encryption_key:
             try:
                 Fernet(self.encryption_key.get_secret_value().encode())

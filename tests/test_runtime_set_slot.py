@@ -7,9 +7,10 @@ from dialogentis.agents import copy_config, empty_config
 from dialogentis.datasets.json_transfer import PortableConfig
 from dialogentis.flow_schema import Flow
 from dialogentis.flow_validation import validate_flow
-from dialogentis.runtime.core import Prediction, RuntimeEngine
+from dialogentis.runtime.core import RuntimeEngine
 from dialogentis.set_slot import validate_set_references
 from dialogentis.slots import validate_slots
+from tests.dialogue_fixtures import clarify
 from tests.test_runtime_core import edge, node
 
 
@@ -42,9 +43,7 @@ def configuration(operation="set", source="constant", value=0):
 
 def run(config, values=None):
     version = uuid4()
-    return RuntimeEngine(
-        version, config, lambda _: Prediction(version, None, ("low_score",))
-    ).start(values)
+    return RuntimeEngine(version, config, clarify).start(values)
 
 
 def test_assignment_constant_copy_clear_and_missing_source():

@@ -15,7 +15,7 @@ from dialogentis.jobs.tasks import process_job
 from dialogentis.jobs.training_tasks import HANDLERS
 from dialogentis.models import Organization, User
 from dialogentis.runtime.cleanup import recover_abandoned_turns
-from dialogentis.runtime.core import Prediction, RuntimeEngine
+from dialogentis.runtime.core import RuntimeEngine
 from dialogentis.runtime.idempotency import (
     ReplayedStart,
     ReservedMessage,
@@ -25,6 +25,7 @@ from dialogentis.runtime.idempotency import (
 )
 from dialogentis.runtime.models import TestConversation as ConversationRecord
 from dialogentis.runtime.receipt_models import RuntimeReceipt
+from tests.dialogue_fixtures import clarify
 from tests.test_auth import client_for
 from tests.test_exports import app as app
 from tests.test_versions import create_agent, populate, prepare
@@ -60,9 +61,7 @@ async def test_initial_turn_is_fenced_and_recovers_actions(app):
         )
         assert created.status_code == 201
         integration_id = UUID(created.json()["id"])
-        engine = RuntimeEngine(
-            version.id, version.snapshot["config"], lambda _: Prediction(version.id, None)
-        )
+        engine = RuntimeEngine(version.id, version.snapshot["config"], clarify)
         initial = engine.initial_state()
         result = engine.start()
         assert result.state.turn == 0 and result.state.status == "waiting_input"

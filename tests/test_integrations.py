@@ -1,7 +1,7 @@
 import os
 from copy import deepcopy
 from pathlib import Path
-from uuid import UUID, uuid4
+from uuid import UUID
 
 import pytest
 from sqlalchemy import select
@@ -9,6 +9,7 @@ from sqlalchemy.exc import DBAPIError
 
 from dialogentis.db import unit_of_work
 from dialogentis.deletion_worker import purge_tenant
+from dialogentis.http_action import HTTP_OUTPUTS
 from dialogentis.integrations.models import Integration
 from dialogentis.integrations.secrets import open_secret
 from dialogentis.jobs.dispatcher import dispatcher_factory
@@ -16,6 +17,7 @@ from dialogentis.models import AgentDraft, Membership
 from tests.test_auth import client_for
 from tests.test_exports import app as app
 from tests.test_exports import mark_published
+from tests.test_runtime_core import edge, node
 from tests.test_versions import create_agent, populate, prepare
 
 pytestmark = [
@@ -104,14 +106,12 @@ async def test_integrations_permissions_rotation_isolation_and_references(app):
             draft = await db.scalar(select(AgentDraft).where(AgentDraft.agent_id == agent_id))
             assert draft is not None
             config = deepcopy(draft.configuration)
-            config["flow"]["nodes"].append(
-                {
-                    "id": str(uuid4()),
-                    "type": "http_action",
-                    "config": {"integration_id": str(integration_id).upper()},
-                    "position": {"x": 0, "y": 0},
-                }
-            )
+            flow = config["flow"]
+            start, switch, _, _ = flow["nodes"]
+            action = node("http_action", integration_id=str(integration_id).upper(), path="/orders")
+            flow["nodes"].append(action)
+            flow["edges"][0] = edge(start, action)
+            flow["edges"].extend(edge(action, switch, output) for output in HTTP_OUTPUTS)
             draft.configuration = config
         delete_headers = {"If-Match": rotated.headers["etag"]}
         assert (await owner.delete(item_path, headers=delete_headers)).status_code == 409
@@ -123,6 +123,16 @@ async def test_integrations_permissions_rotation_isolation_and_references(app):
             config = deepcopy(draft.configuration)
             config["flow"]["nodes"] = [
                 node for node in config["flow"]["nodes"] if node["type"] != "http_action"
+            ]
+            flow = config["flow"]
+            start, switch, _, _ = flow["nodes"]
+            flow["edges"] = [
+                edge(start, switch),
+                *[
+                    item
+                    for item in flow["edges"]
+                    if item["source"] not in {start["id"], action["id"]}
+                ],
             ]
             draft.configuration = config
         assert (await owner.delete(item_path, headers=delete_headers)).status_code == 409

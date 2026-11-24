@@ -25,10 +25,10 @@ from dialogentis.http_action import HttpActionConfig, MockIntegration, mock_http
 from dialogentis.integrations.models import Integration
 from dialogentis.jobs.models import Job
 from dialogentis.models import Agent, Organization, User
+from dialogentis.nlu.dialogue import DialogueDecision
 from dialogentis.nlu.model_store import ModelIdentity
 from dialogentis.runtime.conversations import Principal, PublicAccess, _access
 from dialogentis.runtime.core import (
-    Prediction,
     RuntimeEngine,
     RuntimeResult,
     RuntimeState,
@@ -415,7 +415,7 @@ class TestChatService:
                     lambda: RuntimeEngine(
                         selected,
                         bundle.snapshot["config"],
-                        lambda _: Prediction(selected, None),
+                        lambda _: DialogueDecision(action="clarify", intent=None, values=()),
                     ).initial_state()
                 )
                 reserved = await reserve_initial_turn(

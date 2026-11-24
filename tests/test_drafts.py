@@ -70,9 +70,7 @@ async def test_lease_fencing_permissions_and_atomic_draft_save(app):
             initial_validation.json()["scope"] == "dataset"
             and not initial_validation.json()["complete"]
         )
-        assert "insufficient_intents" in {
-            item["code"] for item in initial_validation.json()["errors"]
-        }
+        assert initial_validation.json()["errors"] == []
         assert (await owner.post(f"{base}/draft/validate", json={"revision": 2})).status_code == 409
         body: dict[str, Any] = {"schema_version": 1, "config": original.json()["config"]}
         a, b = await asyncio.gather(

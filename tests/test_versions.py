@@ -16,12 +16,11 @@ from dialogentis.deletion_worker import purge_tenant
 from dialogentis.jobs.lifecycle import cancel
 from dialogentis.jobs.models import Job, OutboxEvent
 from dialogentis.models import Agent, AgentDraft, Membership, User
-from dialogentis.nlu.settings import NLUSettings
 from dialogentis.versions.models import AgentVersion
 from dialogentis.versions.prepare import TrainingInProgress, prepare_version, version_status
+from tests.dialogue_fixtures import training_dataset
 from tests.test_auth import account, client_for
 from tests.test_exports import app as app
-from tests.test_nlu_intents import training_dataset
 
 pytestmark = [
     pytest.mark.integration,
@@ -49,7 +48,9 @@ async def prepare(app, user_id, org_id, agent_id, revision, key):
     ) as db:
         user = await db.get(User, user_id)
         assert user is not None
-        return await prepare_version(db, user, org_id, agent_id, revision, key)
+        return await prepare_version(
+            db, user, org_id, agent_id, revision, key, app.state.settings.llm_model
+        )
 
 
 async def populate(app, org_id, agent_id):
@@ -88,7 +89,7 @@ async def test_snapshot_idempotency_concurrency_and_job_lifecycle(app):
                     Job(id=uuid4(), organization_id=org_id, kind="agent.training", status="queued"),
                 )
             assert version.number == 1 and version.source_revision == 1
-            assert version.snapshot["nlu_settings"] == NLUSettings().model_dump()
+            assert version.snapshot["llm_model"] == "fixture"
             assert version.idempotency_key_hash != "same-key"
             assert job.kind == "agent.training" and job.queue == event.queue == "training"
             draft = await db.scalar(select(AgentDraft).where(AgentDraft.agent_id == agent_id))
@@ -189,6 +190,12 @@ async def test_snapshots_are_immutable_tenant_scoped_and_removed_with_organizati
 async def test_invalid_dataset_does_not_create_a_job(app):
     async with client_for(app) as client:
         user_id, org_id, agent_id = await create_agent(app, client)
+        async with unit_of_work(app.state.session_factory, organization_id=org_id) as db:
+            draft = await db.scalar(select(AgentDraft).where(AgentDraft.agent_id == agent_id))
+            assert draft is not None
+            configuration = deepcopy(draft.configuration)
+            configuration["flow"]["edges"] = []
+            draft.configuration = configuration
         with pytest.raises(DomainValidationError):
             await prepare(app, user_id, org_id, agent_id, 1, "invalid-data")
         async with unit_of_work(app.state.session_factory, organization_id=org_id) as db:

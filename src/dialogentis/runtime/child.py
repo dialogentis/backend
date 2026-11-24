@@ -1,6 +1,5 @@
 """Execute sequential turns in an isolated process over private pipes."""
 
-import hashlib
 import json
 import os
 import queue
@@ -8,7 +7,6 @@ import resource
 import struct
 import sys
 import threading
-from collections import OrderedDict
 from dataclasses import asdict
 from functools import lru_cache
 from uuid import UUID
@@ -18,11 +16,10 @@ from pydantic import SecretStr
 from dialogentis.config import Settings
 from dialogentis.handoff import MAX_HANDOFF_DEPTH
 from dialogentis.http_action import MockIntegration
-from dialogentis.nlu.adapter import NLUAdapter
-from dialogentis.nlu.model_store import ModelIdentity, unpack_model
+from dialogentis.nlu.dialogue import DialogueDecision, DialogueTurn
+from dialogentis.nlu.model_store import ModelIdentity, verify_dialogue_manifest
 from dialogentis.runtime.core import RuntimeEngine, RuntimeState
 from dialogentis.runtime.history_context import HistoryContext
-from dialogentis.runtime.nlu import nlu_predictor
 from dialogentis.versions.prepare import canonical_hash
 
 MAX_REQUEST = 12 * 1024 * 1024
@@ -56,32 +53,6 @@ def _peak_rss() -> int:
     return size if sys.platform == "darwin" else size * 1024
 
 
-class ModelCache:
-    def __init__(self, settings: Settings, limit: int):
-        self.settings = settings
-        self.limit = limit
-        self.size = 0
-        self.models: OrderedDict[tuple[ModelIdentity, bytes], tuple[NLUAdapter, int]] = (
-            OrderedDict()
-        )
-
-    def load(self, identity: ModelIdentity, artifact: bytes) -> NLUAdapter:
-        key = (identity, hashlib.sha256(artifact).digest())
-        if key in self.models:
-            self.models.move_to_end(key)
-            return self.models[key][0]
-        size = len(artifact)
-        if size <= self.limit:
-            while self.models and self.size + size > self.limit:
-                _, (_, removed_size) = self.models.popitem(last=False)
-                self.size -= removed_size
-        model = unpack_model(artifact, identity, self.settings)
-        if size <= self.limit:
-            self.models[key] = (model, size)
-            self.size += size
-        return model
-
-
 def _write_frame(value: dict) -> None:
     output = json.dumps(
         value, ensure_ascii=False, allow_nan=False, default=str, separators=(",", ":")
@@ -92,7 +63,7 @@ def _write_frame(value: dict) -> None:
     sys.stdout.buffer.flush()
 
 
-def _execute_turn(packets: queue.Queue, cache: ModelCache, rss_ceiling: int) -> bool:
+def _execute_turn(packets: queue.Queue, settings: Settings, rss_ceiling: int) -> bool:
     request, model = packets.get()
     if not model:
         raise ValueError("Runtime model missing")
@@ -135,7 +106,14 @@ def _execute_turn(packets: queue.Queue, cache: ModelCache, rss_ceiling: int) -> 
         snapshot = payload["snapshot"]
         if snapshot["schema_version"] != 1 or canonical_hash(snapshot) != payload["config_hash"]:
             raise ValueError("Invalid snapshot")
-        adapter = cache.load(model_identity, artifact)
+        verify_dialogue_manifest(artifact, model_identity, payload["config_hash"], settings)
+
+        def understand(turn: DialogueTurn) -> DialogueDecision:
+            _write_frame({"kind": "dialogue", "turn": turn.model_dump(mode="json")})
+            reply, extra = packets.get()
+            if extra or not isinstance(reply, dict) or set(reply) != {"decision"}:
+                raise ValueError("Invalid dialogue response")
+            return DialogueDecision.model_validate(reply["decision"])
 
         def http_handler(node_id: UUID, values: dict) -> tuple[str, dict]:
             _write_frame(
@@ -155,7 +133,7 @@ def _execute_turn(packets: queue.Queue, cache: ModelCache, rss_ceiling: int) -> 
         return RuntimeEngine(
             model_identity.version_id,
             snapshot["config"],
-            nlu_predictor(adapter),
+            understand,
             mock_integrations=(
                 [MockIntegration.model_validate(item) for item in mock_integrations]
                 if mock_integrations is not None
@@ -198,11 +176,10 @@ def main() -> None:
         encryption_key_version=int(os.environ["DIALOGENTIS_RUNTIME_KEY_VERSION"]),
         max_model_artifact_bytes=model_limit,
     )
-    cache = ModelCache(settings, cache_limit)
     rss_ceiling = _peak_rss() + cache_limit
     packets: queue.Queue = queue.Queue(maxsize=1)
     threading.Thread(target=_read_packets, args=(packets, model_limit), daemon=True).start()
-    while not _execute_turn(packets, cache, rss_ceiling):
+    while not _execute_turn(packets, settings, rss_ceiling):
         pass
 
 

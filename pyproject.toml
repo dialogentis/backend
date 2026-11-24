@@ -4,12 +4,23 @@ version = "0.1.0"
 description = "Dialogentis API and background workers"
 requires-python = ">=3.14,<3.15"
 dependencies = [
-  "fastapi>=0.120", "uvicorn[standard]>=0.38", "pydantic-settings>=2.11",
-  "sqlalchemy[asyncio]>=2.0.44", "psycopg[binary]>=3.2", "alembic>=1.17",
-  "taskiq>=0.12", "taskiq-aio-pika>=0.5", "httpx>=0.28", "httpcore>=1.0.9,<1.1",
-  "scikit-learn>=1.7", "python-crfsuite>=0.9.12", "google-re2>=1.1",
-  "argon2-cffi>=25", "cryptography>=46", "email-validator>=2.3", "python-multipart>=0.0.33",
+  "fastapi>=0.120",
+  "uvicorn[standard]>=0.38",
+  "pydantic-settings>=2.11",
+  "sqlalchemy[asyncio]>=2.0.44",
+  "psycopg[binary]>=3.2",
+  "alembic>=1.17",
+  "taskiq>=0.12",
+  "taskiq-aio-pika>=0.5",
+  "httpx>=0.28",
+  "httpcore>=1.0.9,<1.1",
+  "google-re2>=1.1",
+  "argon2-cffi>=25",
+  "cryptography>=46",
+  "email-validator>=2.3",
+  "python-multipart>=0.0.33",
   "idna>=3.10",
+  "pydantic-ai-slim[openai]>=2.73,<3",
 ]
 
 [dependency-groups]

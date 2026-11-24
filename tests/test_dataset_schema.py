@@ -14,7 +14,7 @@ def example(intent_id, text, *, split="train", spans=None):
     }
 
 
-def test_valid_dataset_and_minimum_training_warnings():
+def test_valid_dataset_without_training_minimum():
     first, second = uuid4(), uuid4()
     data = Dataset.model_validate(
         {
@@ -32,7 +32,7 @@ def test_valid_dataset_and_minimum_training_warnings():
     )
     errors, warnings = validate_dataset(data)
     assert errors == []
-    assert [issue.code for issue in warnings] == ["few_intent_examples", "few_intent_examples"]
+    assert warnings == []
 
 
 def test_dataset_reports_duplicate_phrases_invalid_references_and_spans():
@@ -70,8 +70,6 @@ def test_dataset_reports_duplicate_phrases_invalid_references_and_spans():
         "unknown_intent",
         "unknown_entity",
         "token_boundary",
-        "insufficient_intents",
-        "insufficient_entity_examples",
     } <= {issue.code for issue in errors}
 
 

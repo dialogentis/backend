@@ -91,6 +91,9 @@ services:
     environment:
       <<: *runtime-env
       FORWARDED_ALLOW_IPS: '*'
+      LLM_BASE_URL: ${LLM_BASE_URL:-}
+      LLM_MODEL: ${LLM_MODEL:-}
+      LLM_API_KEY: ${LLM_API_KEY:-}
     depends_on:
       deletion-replay: {condition: service_completed_successfully}
     ports: ['127.0.0.1:18000:8000']

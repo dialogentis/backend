@@ -1,21 +1,15 @@
-from dataclasses import replace
 from uuid import UUID, uuid4
 
 import pytest
 
 from dialogentis.agents import empty_config
-from dialogentis.datasets.schema import Entity
-from dialogentis.nlu.adapter import NLUAdapter
-from dialogentis.nlu.intent import Thresholds
+from dialogentis.nlu.dialogue import DialogueDecision
 from dialogentis.runtime.core import (
-    EntityValue,
-    Prediction,
     RuntimeEngine,
     RuntimeFault,
     RuntimeState,
 )
-from dialogentis.runtime.nlu import nlu_predictor
-from tests.test_nlu_intents import training_dataset
+from tests.dialogue_fixtures import clarify, route, value
 from tests.test_runtime_core import edge, node
 
 
@@ -62,7 +56,7 @@ def test_prompt_retry_success_and_no_input_reuse():
     engine = RuntimeEngine(
         version,
         config,
-        lambda message: calls.append(message.text) or Prediction(version, None, ("low_score",)),
+        lambda message: calls.append(message.text) or clarify(message),
     )
     first = engine.start()
     assert first.messages == ("Укажите значение",) and first.state.pending_ask == UUID(ask["id"])
@@ -80,7 +74,7 @@ def test_prompt_retry_success_and_no_input_reuse():
 def test_exhausted_retries_clear_values_and_checkpoint():
     version = uuid4()
     config, _, _ = ask_config()
-    engine = RuntimeEngine(version, config, lambda _: Prediction(version, None, ("low_score",)))
+    engine = RuntimeEngine(version, config, clarify)
     first = engine.send(engine.start().state, "первый неверный")
     result = engine.send(first.state, "второй неверный")
     assert result.state.status == "completed" and result.messages == ("Диалог завершён",)
@@ -91,7 +85,7 @@ def test_exhausted_retries_clear_values_and_checkpoint():
 def test_successful_slot_input_resets_consecutive_fallbacks():
     version = uuid4()
     config, _, _ = ask_config()
-    engine = RuntimeEngine(version, config, lambda _: Prediction(version, None, ("low_score",)))
+    engine = RuntimeEngine(version, config, clarify)
     waiting = engine.start().state.model_copy(update={"fallback_count": 2})
     result = engine.send(waiting, "42")
     assert result.state.status == "waiting_input" and result.state.fallback_count == 0
@@ -99,20 +93,22 @@ def test_successful_slot_input_resets_consecutive_fallbacks():
 
 def test_valid_default_is_not_treated_as_missing_when_false_or_zero():
     version = uuid4()
-    for kind, value, displayed in (("integer", 0, "0"), ("boolean", False, "нет")):
+    for kind, default, displayed in (("integer", 0, "0"), ("boolean", False, "нет")):
         config, _, _ = ask_config(kind)
-        config["slots"][0]["default"] = value
-        engine = RuntimeEngine(version, config, lambda _: Prediction(version, None, ("low_score",)))
+        config["slots"][0]["default"] = default
+        engine = RuntimeEngine(version, config, clarify)
         result = engine.start()
         assert result.messages == (f"Получено: {displayed}",)
         assert (
-            result.state.pending_ask is None and dict(result.state.slot_values)["order_id"] == value
+            result.state.pending_ask is None
+            and dict(result.state.slot_values)["order_id"] == default
         )
 
 
 def test_entity_from_intent_message_is_exact_and_used_once():
     version, intent_id, entity_id = uuid4(), uuid4(), uuid4()
     config, ask, _ = ask_config("number", entity_id=str(entity_id))
+    config["slots"][0]["sensitive"] = False
     config["intents"] = [{"id": str(intent_id), "code": "order", "name": "Заказ"}]
     config["entities"] = [
         {
@@ -131,17 +127,13 @@ def test_entity_from_intent_message_is_exact_and_used_once():
 
     def predict(message):
         calls.append(message.text)
-        at = message.text.index("сумма")
-        return Prediction(
-            version, intent_id, (), (EntityValue(entity_id, at, at + 5, "сумма", "dictionary"),)
-        )
+        return route("order", value("order_id", "сумма"))
 
     engine = RuntimeEngine(version, config, predict)
     result = engine.send(engine.start().state, "заказ сумма")
     assert result.messages == ("Получено: 12345678901234567890.01",)
     assert dict(result.state.slot_values)["order_id"] == "12345678901234567890.01"
     assert result.state.status == "waiting_input" and calls == ["заказ сумма"]
-    assert "12345678901234567890.01" not in repr(result.state)
     assert all("сумма" not in repr(event) for event in result.trace)
     assert start["type"] == "start"
 
@@ -160,13 +152,11 @@ def test_entity_value_can_be_taken_from_an_answer_and_bad_spans_are_rejected():
         }
     ]
 
-    def predict(message):
-        at = message.text.index("столица")
-        return Prediction(
-            version,
-            None,
-            ("low_score",),
-            (EntityValue(entity_id, at, at + 7, "столица", "dictionary"),),
+    config["slots"][0]["sensitive"] = False
+
+    def predict(_):
+        return DialogueDecision(
+            action="continue", intent=None, values=(value("order_id", "столица"),)
         )
 
     engine = RuntimeEngine(version, config, predict)
@@ -176,18 +166,19 @@ def test_entity_value_can_be_taken_from_an_answer_and_bad_spans_are_rejected():
     bad = RuntimeEngine(
         version,
         config,
-        lambda message: replace(
-            predict(message), entities=(EntityValue(entity_id, 0, 2, "SECRET", "dictionary"),)
+        lambda _: DialogueDecision(
+            action="continue", intent=None, values=(value("order_id", "SECRET"),)
         ),
     )
     result = bad.send(bad.start().state, "столица")
-    assert result.error_code == "invalid_nlu_result" and "SECRET" not in repr(result.trace)
+    assert result.error_code == "nlu_error" and "SECRET" not in repr(result.trace)
     assert result.state.slot_values == ()
 
 
-def test_one_message_is_not_reused_by_a_second_ask_slot():
+def test_multiple_explicit_entities_fill_their_own_slots():
     version, intent_id, city_id, product_id, second_slot = (uuid4() for _ in range(5))
     config, first_ask, _ = ask_config("string", entity_id=str(city_id))
+    config["slots"][0]["sensitive"] = False
     config["intents"] = [{"id": str(intent_id), "code": "order", "name": "Заказ"}]
     config["entities"] = [
         {
@@ -231,22 +222,13 @@ def test_one_message_is_not_reused_by_a_second_ask_slot():
         if item["source"] == first_ask["id"] and item["source_handle"] == "success"
     )["target"] = second_ask["id"]
 
-    def predict(_):
-        return Prediction(
-            version,
-            intent_id,
-            (),
-            (
-                EntityValue(city_id, 0, 4, "Омск", "dictionary"),
-                EntityValue(product_id, 5, 10, "Книга", "dictionary"),
-            ),
-        )
-
-    engine = RuntimeEngine(version, config, predict)
+    engine = RuntimeEngine(
+        version, config, lambda _: route("order", value("order_id", "Омск"), value("item", "Книга"))
+    )
     result = engine.send(engine.start().state, "Омск Книга")
-    assert result.messages == ("Какой товар?",)
-    assert result.state.pending_ask == UUID(second_ask["id"])
-    assert dict(result.state.slot_values) == {"order_id": "Омск", "item": None}
+    assert result.messages == ()
+    assert result.state.pending_ask is None
+    assert dict(result.state.slot_values) == {"order_id": "Омск", "item": "Книга"}
 
 
 def test_ambiguous_entities_count_as_invalid_and_checkpoint_is_checked():
@@ -262,19 +244,8 @@ def test_ambiguous_entities_count_as_invalid_and_checkpoint_is_checked():
             "dictionary": [{"value": "Омск"}, {"value": "Томск"}],
         }
     ]
-    engine = RuntimeEngine(
-        version,
-        config,
-        lambda _: Prediction(
-            version,
-            None,
-            ("low_score",),
-            (
-                EntityValue(entity_id, 0, 4, "Омск", "dictionary"),
-                EntityValue(entity_id, 5, 10, "Томск", "dictionary"),
-            ),
-        ),
-    )
+    config["slots"][0]["sensitive"] = False
+    engine = RuntimeEngine(version, config, clarify)
     waiting = engine.start().state
     result = engine.send(waiting, "Омск Томск")
     assert result.messages == ("Значение не подошло", "Укажите значение")
@@ -282,58 +253,3 @@ def test_ambiguous_entities_count_as_invalid_and_checkpoint_is_checked():
     broken = waiting.model_copy(update={"pending_ask": uuid4()})
     with pytest.raises(RuntimeFault, match="invalid_checkpoint"):
         engine.send(broken, "Омск")
-
-
-def test_real_nlu_entities_feed_slot_collection():
-    version = uuid4()
-    dataset = training_dataset()
-    entity_id = uuid4()
-    entity = {
-        "id": str(entity_id),
-        "code": "city",
-        "name": "Город",
-        "value_type": "string",
-        "method": "dictionary",
-        "dictionary": [{"value": "Москва"}],
-    }
-    dataset = dataset.model_copy(
-        update={"entities": [*dataset.entities, Entity.model_validate(entity)]}
-    )
-    model = NLUAdapter.train(version, dataset, Thresholds(score=0, margin=0, similarity=0))
-    config, ask, _ = ask_config("string", entity_id=str(entity_id))
-    config.update(dataset.model_dump(mode="json"))
-    start, switch = config["flow"]["nodes"][:2]
-    config["flow"]["edges"][0]["target"] = switch["id"]
-    config["flow"]["edges"].append(edge(switch, ask, str(dataset.intents[0].id)))
-    result = RuntimeEngine(version, config, nlu_predictor(model))
-    step = result.send(result.start().state, "где заказ Москва")
-    assert (
-        step.messages == ("Получено: Москва",)
-        and dict(step.state.slot_values)["order_id"] == "Москва"
-    )
-    assert start["type"] == "start"
-
-
-def test_real_dictionary_number_does_not_round_through_float():
-    version, entity_id = uuid4(), uuid4()
-    dataset = training_dataset()
-    entity = Entity.model_validate(
-        {
-            "id": str(entity_id),
-            "code": "amount",
-            "name": "Сумма",
-            "value_type": "number",
-            "method": "dictionary",
-            "dictionary": [{"value": "12345678901234567890.01", "synonyms": ["сумма"]}],
-        }
-    )
-    dataset = dataset.model_copy(update={"entities": [entity]})
-    model = NLUAdapter.train(version, dataset, Thresholds(score=0, margin=0, similarity=0))
-    config, ask, _ = ask_config("number", entity_id=str(entity_id))
-    config.update(dataset.model_dump(mode="json"))
-    switch = config["flow"]["nodes"][1]
-    config["flow"]["edges"][0]["target"] = switch["id"]
-    config["flow"]["edges"].append(edge(switch, ask, str(dataset.intents[0].id)))
-    engine = RuntimeEngine(version, config, nlu_predictor(model))
-    result = engine.send(engine.start().state, "где заказ сумма")
-    assert dict(result.state.slot_values)["order_id"] == "12345678901234567890.01"

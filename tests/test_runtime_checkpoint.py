@@ -13,6 +13,7 @@ from dialogentis.runtime.checkpoint import (
     encrypt_checkpoint,
 )
 from dialogentis.runtime.core import RuntimeState
+from tests.dialogue_fixtures import clarify
 
 
 def test_encrypted_checkpoint_binds_all_context_and_hides_values():
@@ -54,15 +55,13 @@ def test_encrypted_checkpoint_binds_all_context_and_hides_values():
 
 
 def test_roundtrip_resumes_real_runtime_with_sensitive_values():
-    from dialogentis.runtime.core import Prediction, RuntimeEngine
+    from dialogentis.runtime.core import RuntimeEngine
     from tests.test_runtime_ask_slot import ask_config
 
     identity = CheckpointIdentity(uuid4(), uuid4(), uuid4(), uuid4())
     settings = Settings(encryption_key=SecretStr(Fernet.generate_key().decode()))
     config, _, _ = ask_config()
-    engine = RuntimeEngine(
-        identity.version_id, config, lambda _: Prediction(identity.version_id, None, ("low_score",))
-    )
+    engine = RuntimeEngine(identity.version_id, config, clarify)
     pending = engine.start()
     collected = engine.send(pending.state, "731598")
     sealed = encrypt_checkpoint(collected.state, identity, settings)

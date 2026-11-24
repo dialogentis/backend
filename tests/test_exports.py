@@ -18,6 +18,7 @@ from dialogentis.jobs.lifecycle import claim, complete
 from dialogentis.jobs.models import Job, OutboxEvent
 from dialogentis.jobs.tasks import process_job
 from dialogentis.models import AgentDraft
+from tests.dialogue_fixtures import install_provider
 from tests.test_auth import account, client_for, mail_token
 
 pytestmark = [
@@ -31,6 +32,7 @@ pytestmark = [
 @pytest.fixture
 async def app(tmp_path, monkeypatch):
     monkeypatch.setenv("ARTIFACT_ROOT", str(tmp_path))
+    install_provider(monkeypatch)
     get_settings.cache_clear()
     application = create_app(Settings(public_base_url="http://test", artifact_root=tmp_path))
     async with application.router.lifespan_context(application):

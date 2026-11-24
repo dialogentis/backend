@@ -1,26 +1,77 @@
-"""Build the portable agent files and evaluate their frozen test sets."""
+"""Build portable agent files with examples and test phrases."""
 
 import argparse
-import hashlib
 import json
-import platform
-from importlib.metadata import version
+import re
+from pathlib import Path
+from uuid import NAMESPACE_URL, uuid5
 
-from benchmarks.nlu.evaluate import FIXTURES, build_dataset, identifier
 from dialogentis.agents import empty_config
 from dialogentis.datasets.export_worker import serialize_export
-from dialogentis.datasets.schema import validate_dataset
-from dialogentis.nlu.adapter import NLUAdapter
-from dialogentis.nlu.intent import Thresholds
-from dialogentis.nlu.settings import NLUSettings
+from dialogentis.datasets.schema import Dataset, validate_dataset
+
+FIXTURES = Path(__file__).with_name("fixtures.json")
+
+
+def identifier(*parts: str):
+    return uuid5(NAMESPACE_URL, "dialogentis/benchmark/" + "/".join(parts))
+
+
+def build_dataset(name: str, fixture: dict) -> Dataset:
+    entity = fixture["entity"]
+    entity_id = identifier(name, "entity", entity["code"])
+    intents = [
+        {"id": identifier(name, "intent", item["code"]), "code": item["code"], "name": item["name"]}
+        for item in fixture["intents"]
+    ]
+    examples = []
+    for item in fixture["intents"]:
+        for split in ("train", "test"):
+            for text in item[split]:
+                spans = []
+                for term in entity["values"]:
+                    for match in re.finditer(r"(?<!\w)" + re.escape(term) + r"(?!\w)", text, re.I):
+                        spans.append(
+                            {"entity_id": entity_id, "start": match.start(), "end": match.end()}
+                        )
+                examples.append(
+                    {
+                        "id": identifier(name, split, text),
+                        "text": text,
+                        "intent_id": identifier(name, "intent", item["code"]),
+                        "split": split,
+                        "spans": spans,
+                    }
+                )
+    for text in fixture["unknown"]:
+        examples.append(
+            {
+                "id": identifier(name, "unknown", text),
+                "text": text,
+                "expected_fallback": True,
+                "split": "test",
+                "spans": [],
+            }
+        )
+    return Dataset.model_validate(
+        {
+            "intents": intents,
+            "entities": [
+                {
+                    "id": entity_id,
+                    "code": entity["code"],
+                    "name": entity["name"],
+                    "method": "dictionary",
+                    "value_type": "string",
+                    "dictionary": [{"value": term} for term in entity["values"]],
+                }
+            ],
+            "examples": examples,
+        }
+    )
+
 
 DEVELOPMENT = FIXTURES.with_name("demo_training.json")
-SETTINGS = {
-    "order_support": NLUSettings(score=0.30, margin=0.05, similarity=0.20),
-    "education": NLUSettings(
-        score=0.50, margin=0.16, similarity=0.15, vocabulary_coverage=0.55, classifier_c=10
-    ),
-}
 ANSWERS = {
     "order_status": "Статус заказа доступен в личном кабинете в разделе «Заказы».",
     "delivery": "Срок доставки указан в заказе. Для уточнения адреса откройте карточку доставки.",
@@ -62,8 +113,6 @@ def demo_config(name: str, fixture: dict) -> dict:
         raise ValueError(f"{name}: invalid dataset: {[(item.path, item.code) for item in errors]}")
     config = empty_config()
     config.update(dataset.model_dump(mode="json"))
-    config["nlu_settings"] = SETTINGS[name].model_dump()
-    config["quality_settings"] = {"intent_f1": 0.85, "entity_f1": 0.85}
     flow = config["flow"]
     switch, end = flow["nodes"][1], flow["nodes"][3]
     end["position"] = {"x": 750, "y": 0}
@@ -98,50 +147,9 @@ def demo_config(name: str, fixture: dict) -> dict:
 
 def main() -> None:
     command = argparse.ArgumentParser(description=__doc__)
-    command.add_argument(
-        "agent", choices=("order_support", "education", "evaluate"), help="Agent JSON or evaluation"
-    )
-    args = command.parse_args()
-    fixtures = load_demo_fixtures()
-    if args.agent != "evaluate":
-        print(serialize_export(demo_config(args.agent, fixtures[args.agent]), "json").decode())
-        return
-    results = {}
-    for name, fixture in fixtures.items():
-        dataset = build_dataset(name, fixture)
-        settings = SETTINGS[name]
-        model = NLUAdapter.train(
-            identifier(name, "demo"),
-            dataset,
-            Thresholds.from_settings(settings),
-            classifier_c=settings.classifier_c,
-        )
-        report = model.evaluate(dataset)
-        results[name] = {
-            "settings": settings.model_dump(),
-            "training_examples": model.intent_model.manifest["training_examples"],
-            "intent_macro_f1": report.intents.macro_f1,
-            "entity_f1": report.entities.f1,
-            "known_test_count": report.intents.known_count,
-            "unknown_test_count": report.intents.unknown_count,
-            "unknown_rejection": report.intents.unknown_rejection,
-        }
-    print(
-        json.dumps(
-            {
-                "fixture_sha256": hashlib.sha256(FIXTURES.read_bytes()).hexdigest(),
-                "development_sha256": hashlib.sha256(DEVELOPMENT.read_bytes()).hexdigest(),
-                "uv_lock_sha256": hashlib.sha256(
-                    (FIXTURES.parents[2] / "uv.lock").read_bytes()
-                ).hexdigest(),
-                "python": platform.python_version(),
-                "platform": platform.platform(),
-                "scikit_learn": version("scikit-learn"),
-                "results": results,
-            },
-            indent=2,
-        )
-    )
+    command.add_argument("agent", choices=("order_support", "education"))
+    name = command.parse_args().agent
+    print(serialize_export(demo_config(name, load_demo_fixtures()[name]), "json").decode())
 
 
 if __name__ == "__main__":

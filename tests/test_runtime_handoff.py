@@ -5,8 +5,9 @@ import pytest
 from dialogentis.agents import copy_config, empty_config
 from dialogentis.datasets.export_worker import serialize_export
 from dialogentis.datasets.json_transfer import parse_json
-from dialogentis.runtime.core import Prediction, RuntimeEngine, RuntimeState
+from dialogentis.runtime.core import RuntimeEngine, RuntimeState
 from dialogentis.runtime.history_context import ContextMessage, HistoryContext, recent_history
+from tests.dialogue_fixtures import answer, clarify
 from tests.test_runtime_core import edge, node
 
 
@@ -59,7 +60,7 @@ def engines(root, target, root_version, target_version):
         versions[version] = RuntimeEngine(
             version,
             config,
-            lambda _, version=version: Prediction(version, None, ("low_score",)),
+            answer,
             resolve_version=versions.get,
         )
     return versions[root_version]
@@ -158,7 +159,7 @@ def test_only_enabled_text_context_reaches_next_agent(forward, include):
     second = RuntimeEngine(
         target_version,
         target,
-        lambda message: seen.append(message) or Prediction(target_version, None, ("low_score",)),
+        lambda message: seen.append(message) or clarify(message),
     )
     call["config"].update(forward_current_message=forward, include_history=include)
     root_inputs = []
@@ -172,9 +173,7 @@ def test_only_enabled_text_context_reaches_next_agent(forward, include):
     first = RuntimeEngine(
         root_version,
         root,
-        lambda message: (
-            root_inputs.append(message) or Prediction(root_version, None, ("low_score",))
-        ),
+        lambda message: root_inputs.append(message) or clarify(message),
         resolve_version={target_version: second}.get,
         load_history=load_history,
     )

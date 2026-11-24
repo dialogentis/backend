@@ -2,7 +2,8 @@ from copy import deepcopy
 from uuid import UUID, uuid4
 
 from dialogentis.http_action import MockIntegration
-from dialogentis.runtime.core import Prediction, RuntimeEngine
+from dialogentis.runtime.core import RuntimeEngine
+from tests.dialogue_fixtures import clarify
 from tests.test_http_action_config import configuration
 from tests.test_runtime_core import edge, node
 
@@ -45,9 +46,7 @@ def test_mock_action_maps_only_allowed_fields_and_branches_without_leaking_value
     version = uuid4()
 
     def run(allowed):
-        engine = RuntimeEngine(
-            version, config, lambda _: Prediction(version, None), mock_integrations=allowed
-        )
+        engine = RuntimeEngine(version, config, clarify, mock_integrations=allowed)
         opened = engine.start()
         assert opened.messages == ("Укажите номер заказа",)
         invalid = engine.send(opened.state, "01")
@@ -102,7 +101,5 @@ def test_mock_action_turn_is_limited_to_three_calls():
         response_fields=["status"],
     )
     version = uuid4()
-    result = RuntimeEngine(
-        version, config, lambda _: Prediction(version, None), mock_integrations=[integration]
-    ).start()
+    result = RuntimeEngine(version, config, clarify, mock_integrations=[integration]).start()
     assert result.state.status == "failed" and result.error_code == "http_action_limit"

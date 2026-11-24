@@ -70,7 +70,8 @@ def test_false_exists_nested_and_type_validation():
 def test_runtime_and_graph_use_branch_handles():
     from dialogentis.agents import empty_config
     from dialogentis.flow_validation import validate_flow
-    from dialogentis.runtime.core import Prediction, RuntimeEngine
+    from dialogentis.runtime.core import RuntimeEngine
+    from tests.dialogue_fixtures import clarify
     from tests.test_runtime_core import edge, node
 
     config = empty_config()
@@ -90,7 +91,7 @@ def test_runtime_and_graph_use_branch_handles():
         edge(conditional, end, "else"),
     ]
     assert not validate_flow(config)[0]
-    engine = RuntimeEngine(version, config, lambda _: Prediction(version, None, ("low_score",)))
+    engine = RuntimeEngine(version, config, clarify)
     assert engine.start({"amount": 10}).state.status == "waiting_input"
     assert engine.start({"amount": 9}).state.status == "completed"
     config["flow"]["edges"].pop()

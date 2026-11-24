@@ -1,7 +1,6 @@
 """Readiness checks for a proposed immutable release."""
 
 import asyncio
-from collections import Counter
 from uuid import UUID
 
 from fastapi import HTTPException
@@ -12,7 +11,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from dialogentis.artifact_records import Artifact
 from dialogentis.config import Settings
 from dialogentis.datasets.routes import validate_configuration
-from dialogentis.datasets.schema import Dataset
 from dialogentis.flow_validation import validate_flow
 from dialogentis.http_action import HttpActionConfig
 from dialogentis.integrations.models import Integration
@@ -87,50 +85,12 @@ def _configuration(version: AgentVersion, check: ReleaseCheck) -> list[HttpActio
     if errors or graph_errors:
         return []
 
-    dataset = Dataset.model_validate(
-        {key: config[key] for key in ("intents", "entities", "examples")}
-    )
-    test = [item for item in dataset.examples if item.split == "test"]
-    counts = Counter(item.intent_id for item in test)
-    if any(intent.enabled and counts[intent.id] < 3 for intent in dataset.intents):
-        check.errors.append(
-            ReleaseIssue(
-                code="release_test_minimum",
-                message="Нужны хотя бы три тестовые фразы на каждое включённое намерение",
-                version_id=version.id,
-            )
-        )
-    report = version.validation_report or {}
-    for group in ("intents", "entities"):
-        metrics = report.get(group, {})
-        evaluated, excluded = metrics.get("test_count"), metrics.get("excluded_disabled_count")
-        if (
-            type(evaluated) is not int
-            or type(excluded) is not int
-            or evaluated + excluded != len(test)
-        ):
-            check.errors.append(
-                ReleaseIssue(
-                    code="release_incomplete_evaluation",
-                    message="Отчёт не подтверждает оценку всех тестовых примеров",
-                    version_id=version.id,
-                )
-            )
-            break
-    for kind, name in (("intent", "намерений"), ("entity", "сущностей")):
-        if f"low_{kind}_quality" in report.get("warnings", []):
-            check.warnings.append(
-                ReleaseIssue(
-                    code=f"low_{kind}_quality",
-                    message=f"F1 {name} ниже порога, указанного в версии",
-                    version_id=version.id,
-                )
-            )
-    return [
+    actions = [
         HttpActionConfig.model_validate(node["config"])
         for node in config["flow"]["nodes"]
         if node["type"] == "http_action"
     ]
+    return actions
 
 
 async def check_release(
@@ -202,6 +162,15 @@ async def check_release(
     )
     for version in versions:
         artifact_id = version.model_artifact_id
+        if not settings.llm_base_url or not version.snapshot.get("llm_model"):
+            check.errors.append(
+                ReleaseIssue(
+                    code="release_llm_unavailable",
+                    message="Настройте подключение к LLM для этой версии",
+                    version_id=version.id,
+                )
+            )
+            continue
         if (
             version.agent_id not in active_ids
             or artifact_id not in artifact_ids
@@ -210,7 +179,7 @@ async def check_release(
             check.errors.append(
                 ReleaseIssue(
                     code="release_unavailable_dependency",
-                    message="Версия или модель недоступна",
+                    message="Версия или её снимок недоступны",
                     version_id=version.id,
                 )
             )

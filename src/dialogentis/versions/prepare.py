@@ -15,8 +15,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from dialogentis.agents import agent_and_draft
 from dialogentis.api_errors import DomainValidationError
 from dialogentis.datasets.routes import issue_view, validate_configuration
-from dialogentis.datasets.schema import Dataset
 from dialogentis.drafts import DraftConfig
+from dialogentis.flow_validation import validate_flow
 from dialogentis.jobs.enqueue import enqueue
 from dialogentis.jobs.models import Job
 from dialogentis.models import User
@@ -43,13 +43,16 @@ def canonical_hash(value: object) -> str:
     return hashlib.sha256(data.encode("utf-8")).hexdigest()
 
 
-def nlu_hash(config: dict, settings: dict) -> str:
-    data = Dataset.model_validate({key: config[key] for key in ("intents", "entities", "examples")})
-    payload = data.model_dump(mode="json")
-    payload["examples"] = [item for item in payload["examples"] if item["split"] == "train"]
-    for key in ("intents", "entities", "examples"):
-        payload[key].sort(key=lambda item: item["id"])
-    return canonical_hash({"schema_version": 1, "dataset": payload, "settings": settings})
+def nlu_hash(snapshot: dict) -> str:
+    config = snapshot["config"]
+    return canonical_hash(
+        {
+            "model": snapshot["llm_model"],
+            "intents": config["intents"],
+            "entities": config["entities"],
+            "examples": [item for item in config["examples"] if item["split"] == "train"],
+        }
+    )
 
 
 def version_status(
@@ -81,6 +84,7 @@ async def prepare_version(
     agent_id: UUID,
     source_revision: int,
     idempotency_key: str,
+    llm_model: str,
 ) -> PreparedVersion:
     if type(source_revision) is not int or source_revision < 1:
         raise ValueError("Invalid source revision")
@@ -106,7 +110,7 @@ async def prepare_version(
         return PreparedVersion(previous, True)
     agent, draft = await agent_and_draft(db, org_id, agent_id)
     if agent.status != "active":
-        raise HTTPException(409, "Архивного агента нельзя обучить")
+        raise HTTPException(409, "Для архивного агента нельзя подготовить версию")
     if draft.revision != source_revision:
         raise HTTPException(409, "Черновик изменился. Обновите страницу")
     running = await db.scalar(
@@ -129,12 +133,16 @@ async def prepare_version(
     if len(encoded) > 10 * 1024 * 1024:
         raise HTTPException(413, "Черновик превышает 10 МиБ")
     errors, warnings = await asyncio.to_thread(validate_configuration, config)
+    flow_errors, flow_warnings = await asyncio.to_thread(validate_flow, config)
+    errors.extend(flow_errors)
+    warnings.extend(flow_warnings)
     if not errors and any(node["type"] == "handoff" for node in config["flow"]["nodes"]):
         errors.extend(await validate_handoff_dependencies(db, org_id, agent_id, config))
     if errors:
         raise DomainValidationError([issue_view(item).model_dump() for item in errors[:1000]])
-    settings = config["nlu_settings"]
-    snapshot = {"schema_version": draft.schema_version, "config": config, "nlu_settings": settings}
+    if not llm_model:
+        raise HTTPException(409, "Администратор сервера должен настроить подключение к LLM")
+    snapshot = {"schema_version": draft.schema_version, "config": config, "llm_model": llm_model}
     number = await db.scalar(
         select(func.coalesce(func.max(AgentVersion.number), 0)).where(
             AgentVersion.organization_id == org_id, AgentVersion.agent_id == agent_id
@@ -149,7 +157,7 @@ async def prepare_version(
         source_revision=source_revision,
         snapshot=snapshot,
         config_hash=canonical_hash(snapshot),
-        nlu_hash=nlu_hash(config, settings),
+        nlu_hash=nlu_hash(snapshot),
         dataset_warnings=[issue_view(item).model_dump() for item in warnings[:1000]],
         warnings_truncated=len(warnings) > 1000,
         job_id=job.id,

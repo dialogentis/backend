@@ -1,6 +1,7 @@
 """Run each turn in an isolated child with a bounded lifetime and model cache."""
 
 import asyncio
+import hashlib
 import json
 import struct
 import sys
@@ -24,6 +25,8 @@ from dialogentis.config import Settings
 from dialogentis.flow_schema import Flow
 from dialogentis.handoff import HandoffConfig
 from dialogentis.http_action import HTTP_OUTPUTS, HttpActionConfig, MockIntegration
+from dialogentis.nlu.dialogue import DialogueTurn
+from dialogentis.nlu.llm import DialogueUnavailable, interpret
 from dialogentis.nlu.model_store import ModelIdentity
 from dialogentis.runtime.child import MAX_REQUEST, MAX_RESPONSE
 from dialogentis.runtime.core import (
@@ -238,7 +241,8 @@ class RuntimeExecutor:
         slots: dict[str, Slot] = {}
         targets: dict[UUID, UUID] = {}
         history_nodes: set[UUID] = set()
-        if target_loader is None:
+        llm_model = snapshot.get("llm_model")
+        if target_loader is None and llm_model is None:
             history_loader = None
         if http_handler is not None or target_loader is not None:
             try:
@@ -291,6 +295,8 @@ class RuntimeExecutor:
                         target_loader,
                         history_nodes,
                         history_loader,
+                        llm_model,
+                        text,
                     )
         except TimeoutError:
             raise ExecutionError("runtime_timeout") from None
@@ -308,6 +314,8 @@ class RuntimeExecutor:
         target_loader: TargetLoader | None,
         history_nodes: set[UUID],
         history_loader: HistoryLoader | None,
+        llm_model: str | None,
+        text: str | None,
     ) -> RuntimeResult:
         assert settings.encryption_key is not None
         child_config = (
@@ -338,6 +346,8 @@ class RuntimeExecutor:
             history_scopes = {identity.version_id: history_nodes}
             history_payload = None
             history_requests = 0
+            dialogue_models = {identity.version_id: llm_model}
+            dialogue_requests = 0
             while True:
                 size = struct.unpack(">I", await process.stdout.readexactly(4))[0]
                 if not 1 <= size <= MAX_RESPONSE:
@@ -386,6 +396,7 @@ class RuntimeExecutor:
                     targets.update(references)
                     scopes[requested] = (target_actions, target_slots, target.http_handler)
                     history_scopes[requested] = history_nodes
+                    dialogue_models[requested] = target.snapshot.get("llm_model")
                     payload = json.dumps(
                         {
                             "kind": "target",
@@ -416,6 +427,34 @@ class RuntimeExecutor:
                     if history_payload is None:
                         history_payload = (await history_loader()).model_dump_json().encode("utf-8")
                     await write_packet(history_payload)
+                    continue
+                if frame.get("kind") == "dialogue":
+                    turn = DialogueTurn.model_validate(frame.get("turn"))
+                    model_name = dialogue_models.get(turn.version_id)
+                    dialogue_requests += 1
+                    same_input = text is not None and (
+                        turn.text == text
+                        if turn.input_hash is None
+                        else turn.input_hash == hashlib.sha256(text.encode()).hexdigest()
+                    )
+                    if not model_name or not same_input or dialogue_requests > 4:
+                        raise ExecutionError("runtime_invalid_response")
+                    if turn.version_id == identity.version_id and history_loader is not None:
+                        if history_payload is None:
+                            history_payload = (
+                                (await history_loader()).model_dump_json().encode("utf-8")
+                            )
+                        turn = turn.model_copy(
+                            update={"history": HistoryContext.model_validate_json(history_payload)}
+                        )
+                    try:
+                        decision = await interpret(settings, model_name, turn)
+                    except DialogueUnavailable:
+                        await write_packet(b"{}")
+                    else:
+                        await write_packet(
+                            b'{"decision":' + decision.model_dump_json().encode("utf-8") + b"}"
+                        )
                     continue
                 effect = HttpFrame.model_validate(frame)
                 action_scope = scopes.get(effect.version_id or identity.version_id)

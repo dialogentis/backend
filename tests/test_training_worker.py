@@ -8,6 +8,7 @@ import pytest
 from sqlalchemy import select
 
 from dialogentis.artifact_records import Artifact
+from dialogentis.artifact_service import read_artifact
 from dialogentis.artifacts import ArtifactStorage
 from dialogentis.config import get_settings
 from dialogentis.db import unit_of_work
@@ -15,7 +16,7 @@ from dialogentis.jobs.lifecycle import cancel, recover_tenant
 from dialogentis.jobs.models import Job
 from dialogentis.jobs.tasks import Handler, process_job
 from dialogentis.jobs.training_tasks import HANDLERS
-from dialogentis.nlu.model_store import ModelIdentity, load_model
+from dialogentis.nlu.model_store import ModelIdentity, verify_dialogue_manifest
 from dialogentis.training.serial import run_serialized
 from dialogentis.training.worker import prepare_training
 from dialogentis.versions.models import AgentVersion
@@ -39,7 +40,7 @@ async def training_job(app, client):
     return org_id, agent_id, result.version.id, result.version.job_id
 
 
-async def test_training_produces_fenced_model_and_real_report(app):
+async def test_preparation_produces_fenced_signed_snapshot(app):
     async with client_for(app) as client:
         org_id, agent_id, version_id, job_id = await training_job(app, client)
         factory = app.state.session_factory
@@ -52,16 +53,20 @@ async def test_training_produces_fenced_model_and_real_report(app):
             assert job.status == "succeeded" and job.attempts == 1 and job.stage == "packaging"
             assert version_status(version, job) == "ready"
             assert version.validation_report is not None
-            assert version.validation_report["graph_validation"] == "not_checked"
-            assert version.validation_report["intents"]["test_count"] == 2
+            assert version.validation_report["graph_validation"] == "passed"
             assert version.model_artifact_id is not None
             artifacts = (await db.scalars(select(Artifact).where(Artifact.job_id == job_id))).all()
             assert len(artifacts) == 1 and artifacts[0].id == version.model_artifact_id
             identity = ModelIdentity(org_id, agent_id, version_id, version.model_artifact_id)
-            model = await load_model(
-                db, ArtifactStorage(app.state.settings.artifact_root), identity, app.state.settings
+            manifest = await read_artifact(
+                db,
+                ArtifactStorage(app.state.settings.artifact_root),
+                org_id,
+                identity.artifact_id,
+                max_bytes=1024,
+                expected_kind="model",
             )
-            assert model.predict("где заказ 0").intent.ranking
+            verify_dialogue_manifest(manifest, identity, version.config_hash, app.state.settings)
 
 
 async def test_training_completes_through_rabbitmq_and_separate_worker(app, tmp_path):
@@ -104,9 +109,7 @@ async def test_training_completes_through_rabbitmq_and_separate_worker(app, tmp_
                             if job.status == "succeeded":
                                 assert version_status(version, job) == "ready"
                                 assert version.validation_report is not None
-                                assert (
-                                    version.validation_report["graph_validation"] == "not_checked"
-                                )
+                                assert version.validation_report["graph_validation"] == "passed"
                                 break
                             assert job.status != "failed", job.error_code
                         assert worker.returncode is None and dispatcher.returncode is None, (
@@ -120,19 +123,15 @@ async def test_training_completes_through_rabbitmq_and_separate_worker(app, tmp_
                     await asyncio.wait_for(process.wait(), timeout=10)
 
 
-async def test_cancel_kills_running_child_and_never_publishes(app, monkeypatch):
+async def test_cancel_during_preparation_and_never_publishes(app, monkeypatch):
     monkeypatch.setattr("dialogentis.jobs.tasks.HEARTBEAT_INTERVAL", 0.05)
-    original = asyncio.create_subprocess_exec
-    children = []
     started = asyncio.Event()
 
-    async def slow_process(*args, **kwargs):
-        process = await original(args[0], "-m", "tests.training_slow_child", **kwargs)
-        children.append(process)
+    async def slow_stage(*args):
         started.set()
-        return process
+        await asyncio.Event().wait()
 
-    monkeypatch.setattr("dialogentis.training.worker.asyncio.create_subprocess_exec", slow_process)
+    monkeypatch.setattr("dialogentis.training.worker.set_stage", slow_stage)
     async with client_for(app) as client:
         org_id, _, version_id, job_id = await training_job(app, client)
         factory = app.state.session_factory
@@ -148,7 +147,6 @@ async def test_cancel_kills_running_child_and_never_publishes(app, monkeypatch):
                 assert job.heartbeat_at > job.started_at
             assert await cancel(factory, job_id, org_id)
             await task
-        assert children[0].returncode is not None
         async with unit_of_work(factory, organization_id=org_id) as db:
             job = await db.get(Job, job_id)
             version = await db.get(AgentVersion, version_id)
@@ -159,17 +157,13 @@ async def test_cancel_kills_running_child_and_never_publishes(app, monkeypatch):
 
 async def test_lost_training_worker_is_fenced_without_retry(app, monkeypatch):
     monkeypatch.setattr("dialogentis.jobs.tasks.HEARTBEAT_INTERVAL", 0.5)
-    original = asyncio.create_subprocess_exec
-    children = []
     started = asyncio.Event()
 
-    async def slow_process(*args, **kwargs):
-        process = await original(args[0], "-m", "tests.training_slow_child", **kwargs)
-        children.append(process)
+    async def slow_stage(*args):
         started.set()
-        return process
+        await asyncio.Event().wait()
 
-    monkeypatch.setattr("dialogentis.training.worker.asyncio.create_subprocess_exec", slow_process)
+    monkeypatch.setattr("dialogentis.training.worker.set_stage", slow_stage)
     async with client_for(app) as client:
         org_id, _, version_id, job_id = await training_job(app, client)
         factory = app.state.session_factory
@@ -182,7 +176,6 @@ async def test_lost_training_worker_is_fenced_without_retry(app, monkeypatch):
                 job.heartbeat_at = datetime.now(UTC) - timedelta(seconds=91)
             assert await recover_tenant(factory, org_id, frozenset()) == 1
             await task
-        assert children[0].returncode is not None
         async with unit_of_work(factory, organization_id=org_id) as db:
             job = await db.get(Job, job_id)
             version = await db.get(AgentVersion, version_id)
@@ -190,23 +183,18 @@ async def test_lost_training_worker_is_fenced_without_retry(app, monkeypatch):
             assert job.attempts == 1 and version is not None and version.model_artifact_id is None
 
 
-async def test_training_timeout_terminates_child_without_retry(app, monkeypatch):
-    original = asyncio.create_subprocess_exec
-    children = []
+async def test_training_timeout_fails_without_retry(app, monkeypatch):
 
-    async def slow_process(*args, **kwargs):
-        process = await original(args[0], "-m", "tests.training_slow_child", **kwargs)
-        children.append(process)
-        return process
+    async def slow_stage(*args):
+        await asyncio.Event().wait()
 
-    monkeypatch.setattr("dialogentis.training.worker.asyncio.create_subprocess_exec", slow_process)
+    monkeypatch.setattr("dialogentis.training.worker.set_stage", slow_stage)
     async with client_for(app) as client:
         org_id, _, version_id, job_id = await training_job(app, client)
         handlers = {
             "agent.training": Handler(prepare_training, timeout_seconds=1.5, retryable=False)
         }
         await process_job(app.state.session_factory, job_id, org_id, handlers, "training")
-        assert children and children[0].returncode is not None
         async with unit_of_work(app.state.session_factory, organization_id=org_id) as db:
             job = await db.get(Job, job_id)
             version = await db.get(AgentVersion, version_id)
