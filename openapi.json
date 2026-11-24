@@ -22938,6 +22938,16 @@
         ],
         "title": "VersionInput"
       },
+      "VersionStatus": {
+        "type": "string",
+        "enum": [
+          "building",
+          "ready",
+          "failed",
+          "cancelled",
+          "obsolete"
+        ]
+      },
       "VersionView": {
         "properties": {
           "id": {
@@ -22959,14 +22969,7 @@
             "title": "Source Revision"
           },
           "status": {
-            "type": "string",
-            "enum": [
-              "building",
-              "ready",
-              "failed",
-              "cancelled"
-            ],
-            "title": "Status"
+            "$ref": "#/components/schemas/VersionStatus"
           },
           "job_status": {
             "type": "string",

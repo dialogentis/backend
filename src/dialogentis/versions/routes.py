@@ -16,13 +16,17 @@ from dialogentis.models import Agent
 from dialogentis.organizations import organization_context
 from dialogentis.slots import validate_slots
 from dialogentis.versions.models import AgentVersion
-from dialogentis.versions.prepare import TrainingInProgress, prepare_version, version_status
+from dialogentis.versions.prepare import (
+    TrainingInProgress,
+    VersionStatus,
+    prepare_version,
+    version_status,
+)
 
 router = APIRouter(
     prefix="/api/v1/organizations/{org_id}/agents/{agent_id}/versions", tags=["versions"]
 )
 Stage = Literal["validation", "packaging"]
-VersionStatus = Literal["building", "ready", "failed", "cancelled"]
 JobStatus = Literal["queued", "running", "succeeded", "failed", "cancelled"]
 IdempotencyKey = Annotated[
     str, Header(alias="Idempotency-Key", min_length=1, max_length=128, pattern=r"^[!-~]+$")
@@ -76,7 +80,7 @@ def view(version: AgentVersion, job: Job) -> VersionView:
         job_status=cast(JobStatus, job.status),
         cancel_requested=job.cancel_requested,
         error_code=job.error_code,
-        stage=cast(Stage | None, job.stage),
+        stage=job.stage if job.stage in {"validation", "packaging"} else None,
         created_by=version.created_by,
         created_at=version.created_at,
         config_hash=version.config_hash,

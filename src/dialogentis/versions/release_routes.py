@@ -4,7 +4,7 @@ from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request, Response
 from pydantic import BaseModel, StrictBool, StringConstraints
-from sqlalchemy import select, tuple_
+from sqlalchemy import func, select, tuple_
 
 from dialogentis.agents import agent_and_draft
 from dialogentis.api_errors import error_response
@@ -13,6 +13,7 @@ from dialogentis.contracts import CursorPage, InputModel, revision_etag
 from dialogentis.dependencies import Database
 from dialogentis.models import Agent
 from dialogentis.organizations import audit, organization_context
+from dialogentis.versions.models import AgentVersion
 from dialogentis.versions.release_check import ReleaseCheck, ReleasePin, check_release
 from dialogentis.versions.release_models import Release, ReleaseVersion
 
@@ -206,6 +207,22 @@ async def rollback(
     if release is None:
         raise HTTPException(404, "Публикация не найдена")
     if agent.current_release_id != release.id:
+        obsolete = await db.scalar(
+            select(ReleaseVersion.version_id)
+            .join(
+                AgentVersion,
+                (AgentVersion.id == ReleaseVersion.version_id)
+                & (AgentVersion.organization_id == ReleaseVersion.organization_id),
+            )
+            .where(
+                ReleaseVersion.organization_id == org_id,
+                ReleaseVersion.release_id == release.id,
+                func.coalesce(AgentVersion.snapshot["llm_model"].astext, "") == "",
+            )
+            .limit(1)
+        )
+        if obsolete is not None:
+            raise HTTPException(409, "В этой публикации есть устаревшие версии агентов")
         archived = await db.scalar(
             select(Agent.id)
             .join(

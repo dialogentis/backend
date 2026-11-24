@@ -112,7 +112,17 @@ async def check_release(
         raise HTTPException(404, "Версия не найдена")
     root, job = row
     check = ReleaseCheck()
-    if agent.status != "active" or version_status(root, job) != "ready":
+    status = version_status(root, job)
+    if status == "obsolete":
+        check.errors.append(
+            ReleaseIssue(
+                code="release_obsolete_version",
+                message="Эта версия устарела. Подготовьте новую версию агента.",
+                version_id=version_id,
+            )
+        )
+        return check
+    if agent.status != "active" or status != "ready":
         check.errors.append(
             ReleaseIssue(
                 code="release_not_ready",

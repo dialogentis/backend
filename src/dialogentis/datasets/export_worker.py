@@ -20,7 +20,12 @@ from dialogentis.jobs.models import Job
 def serialize_export(config: dict, format: str) -> bytes:
     try:
         if format == "json":
-            return export_json(PortableConfig.model_validate(config))
+            portable = {
+                key: value
+                for key, value in config.items()
+                if key not in {"nlu_settings", "quality_settings"}
+            }
+            return export_json(PortableConfig.model_validate(portable))
         if format == "csv":
             return export_csv(
                 Dataset.model_validate(

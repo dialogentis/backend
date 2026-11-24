@@ -37,6 +37,8 @@ def llm_transport(monkeypatch):
         body = json.loads(request.content)
         bodies.append(body)
         decision = script.pop(0)
+        if isinstance(decision, httpx2.TransportError):
+            raise decision
         if isinstance(decision, int):
             return httpx2.Response(decision, json={"error": {"message": "provider-only"}})
         return httpx2.Response(
@@ -67,9 +69,14 @@ def llm_transport(monkeypatch):
     llm._agent.cache_clear()
 
 
-async def test_deepseek_uses_json_mode_and_validates_choices(llm_transport):
+async def test_deepseek_recovers_from_transport_failure_and_validates_choices(llm_transport):
     requests, script = llm_transport
-    script.append({"action": "route", "intent": "unavailable", "values": []})
+    script.extend(
+        [
+            httpx2.ReadError("Connection closed"),
+            {"action": "route", "intent": "unavailable", "values": []},
+        ]
+    )
     settings = Settings.model_validate(
         {
             "llm_base_url": "https://api.deepseek.com/v1",
@@ -86,7 +93,7 @@ async def test_deepseek_uses_json_mode_and_validates_choices(llm_transport):
     )
 
     assert (await llm.interpret(settings, "deepseek-flash", turn)).action == "clarify"
-    assert len(requests) == 1
+    assert len(requests) == 2
     body = requests[0]
     assert body["response_format"] == {"type": "json_object"}
     assert body["max_tokens"] == 1024 and "max_completion_tokens" not in body

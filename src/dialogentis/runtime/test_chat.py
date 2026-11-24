@@ -162,7 +162,10 @@ class TestChatService:
         if pair is None:
             raise HTTPException(404, "Версия агента не найдена")
         version, job = pair
-        if version_status(version, job) != "ready" or version.model_artifact_id is None:
+        status = version_status(version, job)
+        if status == "obsolete":
+            raise HTTPException(409, "Эта версия устарела. Подготовьте новую версию агента.")
+        if status != "ready" or version.model_artifact_id is None:
             raise HTTPException(409, "Версия агента ещё не готова")
         if pin and (
             pin.model_artifact_id != version.model_artifact_id

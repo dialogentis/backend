@@ -60,6 +60,8 @@ async def resolve_handoff_dependencies(
         version = await load(call.target_version_id)
         if version is None or version.agent_id != call.target_agent_id:
             raise ValueError("Выберите готовую версию агента из этой организации")
+        if not version.snapshot.get("llm_model"):
+            raise ValueError("Подготовьте новую версию целевого агента и выберите её в сценарии")
         payload = version.snapshot["config"]
         target_slots = definitions(payload)
         try:

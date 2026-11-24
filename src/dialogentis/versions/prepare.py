@@ -55,9 +55,10 @@ def nlu_hash(snapshot: dict) -> str:
     )
 
 
-def version_status(
-    version: AgentVersion, job: Job
-) -> Literal["building", "ready", "failed", "cancelled"]:
+type VersionStatus = Literal["building", "ready", "failed", "cancelled", "obsolete"]
+
+
+def version_status(version: AgentVersion, job: Job) -> VersionStatus:
     if (
         job.id != version.job_id
         or job.organization_id != version.organization_id
@@ -73,7 +74,7 @@ def version_status(
         and version.model_artifact_id is not None
         and version.validation_report is not None
     ):
-        return "ready"
+        return "ready" if version.snapshot.get("llm_model") else "obsolete"
     return "failed"
 
 

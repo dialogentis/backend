@@ -90,7 +90,7 @@ def invalid_flow_response(request: Request, exc: InvalidVersionFlow):
         request,
         409,
         "invalid_version_flow",
-        "В сценарии этой версии есть ошибки. Исправьте черновик и обучите агента заново.",
+        "В сценарии этой версии есть ошибки. Исправьте черновик и подготовьте новую версию.",
         [issue_view(issue).model_dump(mode="json") for issue in exc.errors[:100]],
     )
 

@@ -3,18 +3,25 @@
 import asyncio
 import logging
 from functools import lru_cache
+from time import monotonic
 from urllib.parse import urlsplit
 
 from openai import APIConnectionError, AsyncOpenAI
 from pydantic import SecretStr
 from pydantic_ai import Agent, NativeOutput, PromptedOutput, UsageLimits
-from pydantic_ai.exceptions import AgentRunError, UnexpectedModelBehavior
+from pydantic_ai.exceptions import (
+    AgentRunError,
+    ModelConnectionError,
+    ModelHTTPError,
+    UnexpectedModelBehavior,
+)
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.profiles.openai import OpenAIModelProfile
 from pydantic_ai.providers.openai import OpenAIProvider
 
 from dialogentis.config import Settings
 from dialogentis.nlu.dialogue import DialogueDecision, DialogueTurn, accepts_decision
+from dialogentis.telemetry import log_event
 
 # The SDK includes request bodies and provider error bodies in debug output.
 logging.getLogger("openai._base_client").setLevel(logging.WARNING)
@@ -37,14 +44,15 @@ class DialogueUnavailable(ValueError):
 
 @lru_cache(maxsize=16)
 def _agent(base_url: str, model: str, key: SecretStr | None):
+    deepseek = urlsplit(base_url).hostname == "api.deepseek.com"
     provider = OpenAIProvider(
         openai_client=AsyncOpenAI(
             base_url=base_url,
             api_key=key.get_secret_value() if key else "dialogentis",
-            max_retries=0,
+            max_retries=1 if deepseek else 0,
         )
     )
-    if urlsplit(base_url).hostname == "api.deepseek.com":
+    if deepseek:
         backend = OpenAIChatModel(
             model,
             provider=provider,
@@ -72,6 +80,7 @@ async def interpret(settings: Settings, model: str, turn: DialogueTurn) -> Dialo
     if not settings.llm_base_url:
         raise DialogueUnavailable("Language model endpoint is unavailable")
     prompt = turn.model_dump_json(exclude={"node_id", "version_id", "input_hash"})
+    started = monotonic()
     try:
         async with asyncio.timeout(8):
             result = await _agent(settings.llm_base_url, model, settings.llm_api_key).run(
@@ -81,7 +90,20 @@ async def interpret(settings: Settings, model: str, turn: DialogueTurn) -> Dialo
             )
     except UnexpectedModelBehavior:
         return DialogueDecision(action="clarify", intent=None, values=())
-    except AgentRunError, APIConnectionError, TimeoutError:
+    except (AgentRunError, APIConnectionError, TimeoutError) as exc:
+        if isinstance(exc, TimeoutError):
+            error_code = "llm_timeout"
+        elif isinstance(exc, (APIConnectionError, ModelConnectionError)):
+            error_code = "llm_connection_error"
+        else:
+            error_code = "llm_request_failed"
+        log_event(
+            "runtime",
+            "llm_request_failed",
+            started=started,
+            status=exc.status_code if isinstance(exc, ModelHTTPError) else None,
+            error_code=error_code,
+        )
         raise DialogueUnavailable("Language model request failed") from None
     decision = result.output
     if not accepts_decision(turn, decision):

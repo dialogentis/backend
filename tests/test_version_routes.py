@@ -1,14 +1,19 @@
 import os
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import select
 
+from dialogentis.agents import empty_config
+from dialogentis.artifact_service import reserve_artifact, write_artifact
+from dialogentis.artifacts import ArtifactStorage
 from dialogentis.db import unit_of_work
+from dialogentis.jobs.models import Job
 from dialogentis.jobs.tasks import process_job
 from dialogentis.jobs.training_tasks import HANDLERS
 from dialogentis.models import Membership
 from dialogentis.versions.models import AgentVersion
+from dialogentis.versions.prepare import canonical_hash
 from tests.test_auth import client_for
 from tests.test_exports import app as app
 from tests.test_versions import create_agent, populate
@@ -101,3 +106,74 @@ async def test_missing_llm_configuration_does_not_enqueue(app):
         assert result.status_code == 409
         async with unit_of_work(app.state.session_factory, organization_id=org_id) as db:
             assert (await db.scalars(select(AgentVersion))).all() == []
+
+
+async def test_obsolete_version_requires_rebuild_before_chat_or_publication(app):
+    async with client_for(app) as owner:
+        user_id, org_id, agent_id = await create_agent(app, owner)
+        factory, settings = app.state.session_factory, app.state.settings
+        version_id, job_id = uuid4(), uuid4()
+        snapshot = {"schema_version": 1, "config": {**empty_config(), "nlu_settings": {}}}
+        async with unit_of_work(factory, organization_id=org_id) as db:
+            artifact = await reserve_artifact(
+                db, org_id, kind="model", max_bytes=6, settings=settings
+            )
+            await write_artifact(
+                db, ArtifactStorage(settings.artifact_root), org_id, artifact.id, [b"legacy"]
+            )
+            db.add(
+                Job(
+                    id=job_id,
+                    organization_id=org_id,
+                    kind="agent.training",
+                    queue="training",
+                    status="succeeded",
+                    stage="evaluation",
+                )
+            )
+            await db.flush()
+            db.add(
+                AgentVersion(
+                    id=version_id,
+                    organization_id=org_id,
+                    agent_id=agent_id,
+                    created_by=user_id,
+                    number=1,
+                    source_revision=1,
+                    snapshot=snapshot,
+                    config_hash=canonical_hash(snapshot),
+                    nlu_hash="0" * 64,
+                    idempotency_key_hash="1" * 64,
+                    job_id=job_id,
+                    model_artifact_id=artifact.id,
+                    validation_report={},
+                    dataset_warnings=[],
+                )
+            )
+
+        base = f"/api/v1/organizations/{org_id}/agents/{agent_id}"
+        version = await owner.get(f"{base}/versions/{version_id}")
+        assert version.status_code == 200 and version.json()["status"] == "obsolete"
+        assert version.json()["stage"] is None
+        for mode in ("mock", "live"):
+            started = await owner.post(
+                f"{base}/test-conversations",
+                json={"version_id": str(version_id), "http_mode": mode},
+                headers={"Idempotency-Key": f"legacy-{mode}"},
+            )
+            assert started.status_code == 409
+            assert "Подготовьте новую версию" in started.json()["error"]["message"]
+        checks = await owner.get(f"{base}/versions/{version_id}/release-check")
+        assert checks.json()["errors"][0]["code"] == "release_obsolete_version"
+
+        created = await owner.post(
+            f"{base}/versions",
+            json={"source_revision": 1},
+            headers={"Idempotency-Key": "refresh-version"},
+        )
+        assert created.status_code == 202
+        await process_job(factory, UUID(created.json()["job_id"]), org_id, HANDLERS, "training")
+        started = await owner.post(
+            f"{base}/test-conversations", json={"version_id": created.json()["version_id"]}
+        )
+        assert started.status_code == 201
